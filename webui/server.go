@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,7 @@ type server struct {
 	host    string
 	now     func() time.Time
 	limit   *limiter
+	flows   flowStore  // pending security key requests
 	mu      sync.Mutex // serialises config changes
 }
 
@@ -181,7 +183,7 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 		b, _ := os.ReadFile(s.leases)
 		text(w, http.StatusOK, string(b))
 	case "GET:me":
-		s.me(w, p)
+		s.me(w, r, p)
 	case "GET:prefs":
 		s.getPrefs(w)
 	case "GET:audit":
@@ -202,14 +204,38 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 		text(w, http.StatusOK, string(out))
 	case "POST:pref":
 		s.setPref(w, name, string(body))
+	case "POST:stepup-begin":
+		fr, err := s.beginAssertion(r, "stepup", p.user, p.session)
+		if err != nil {
+			text(w, http.StatusBadRequest, err.Error()+"\n")
+			return
+		}
+		jsonReply(w, http.StatusOK, fr)
 	case "POST:stepup":
 		s.stepUp(w, r, p, body)
+	case "GET:keys":
+		s.listKeys(w, r, p)
+	case "POST:key-register-begin":
+		if s.requireStepUp(w, r, p) {
+			s.keyRegisterBegin(w, r, p, body)
+		}
+	case "POST:key-register-finish":
+		s.keyRegisterFinish(w, r, p, name, body)
+	case "POST:key-delete":
+		if s.requireStepUp(w, r, p) {
+			if !s.st.deleteKey(p.user, name) {
+				text(w, http.StatusNotFound, "no such key\n")
+				return
+			}
+			s.st.log(s.now(), p.user, "key", "deleted "+name)
+			text(w, http.StatusOK, "deleted\n")
+		}
 	case "POST:save":
-		if s.requireStepUp(w, p) {
+		if s.requireStepUp(w, r, p) {
 			s.save(w, p, name, body)
 		}
 	case "POST:apply":
-		if s.requireStepUp(w, p) {
+		if s.requireStepUp(w, r, p) {
 			s.apply(w, p)
 		}
 	case "POST:totp-setup":
@@ -217,13 +243,13 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 	case "POST:totp-enable":
 		s.totpEnable(w, p, body)
 	case "POST:totp-disable":
-		if s.requireStepUp(w, p) {
+		if s.requireStepUp(w, r, p) {
 			s.st.deleteTOTP(p.user)
 			s.st.log(s.now(), p.user, "totp", "disabled")
 			text(w, http.StatusOK, "two-factor login disabled\n")
 		}
 	case "POST:token-create":
-		if s.requireStepUp(w, p) {
+		if s.requireStepUp(w, r, p) {
 			s.createToken(w, p, body)
 		}
 	case "POST:token-delete":
@@ -249,9 +275,11 @@ var tokenActions = map[string]bool{
 // ---- login, step-up, TOTP ----
 
 type credentials struct {
-	User     string `json:"user"`
-	Password string `json:"password"`
-	Code     string `json:"code"`
+	User      string          `json:"user"`
+	Password  string          `json:"password"`
+	Code      string          `json:"code"`
+	Flow      string          `json:"flow"`      // security key request ...
+	Assertion json.RawMessage `json:"assertion"` // ... and the browser's answer
 }
 
 func (s *server) login(w http.ResponseWriter, r *http.Request, body []byte) {
@@ -277,26 +305,42 @@ func (s *server) login(w http.ResponseWriter, r *http.Request, body []byte) {
 		fail()
 		return
 	}
-	usedTOTP := false
-	if secret, on := s.st.totpSecret(c.User); on {
-		if strings.TrimSpace(c.Code) == "" {
-			w.Header().Set("X-Pxmxfw-Need", "totp")
-			text(w, http.StatusUnauthorized, "enter the code from your authenticator app\n")
+	methods := s.secondFactors(r, c.User)
+	used2FA := false
+	switch {
+	case len(methods) == 0:
+	case slices.Contains(methods, "webauthn") && c.Flow != "":
+		if err := s.finishAssertion(r, "login", c.User, "", c.Flow, c.Assertion); err != nil {
+			fail()
 			return
 		}
+		used2FA = true
+	case slices.Contains(methods, "totp") && strings.TrimSpace(c.Code) != "":
+		secret, _ := s.st.totpSecret(c.User)
 		step, ok := totpMatch(secret, c.Code, now)
 		if !ok || !s.st.useTOTPStep(c.User, step) {
 			fail()
 			return
 		}
-		usedTOTP = true
+		used2FA = true
+	default:
+		// the password was right; ask for the second factor
+		w.Header().Set("X-Pxmxfw-Need", strings.Join(methods, ","))
+		reply := map[string]any{"need": methods}
+		if slices.Contains(methods, "webauthn") {
+			if fr, err := s.beginAssertion(r, "login", c.User, ""); err == nil {
+				reply["flow"], reply["options"] = fr.Flow, fr.Options
+			}
+		}
+		jsonReply(w, http.StatusUnauthorized, reply)
+		return
 	}
 	token, err := s.st.newSession(c.User, now)
 	if err != nil {
 		text(w, http.StatusInternalServerError, "could not create a session\n")
 		return
 	}
-	if usedTOTP {
+	if used2FA {
 		s.st.setStepUp(token, now.Add(stepUpWindow))
 	}
 	s.limit.reset("ip:" + ip)
@@ -307,21 +351,35 @@ func (s *server) login(w http.ResponseWriter, r *http.Request, body []byte) {
 	text(w, http.StatusOK, "logged in\n")
 }
 
-// stepUpMethod is what a user confirms changes with.
-func (s *server) stepUpMethod(user string) string {
-	if _, on := s.st.totpSecret(user); on {
-		return "totp"
+// secondFactors lists what the user has besides the password: security
+// keys registered for the host name in use, and TOTP.
+func (s *server) secondFactors(r *http.Request, user string) []string {
+	var m []string
+	if _, rpid, err := rpFor(r); err == nil && s.st.keyCount(user, rpid) > 0 {
+		m = append(m, "webauthn")
 	}
-	return "password"
+	if _, on := s.st.totpSecret(user); on {
+		m = append(m, "totp")
+	}
+	return m
+}
+
+// stepUpMethods is what a user confirms changes with: a second factor, or
+// the password when there is none.
+func (s *server) stepUpMethods(r *http.Request, user string) []string {
+	if m := s.secondFactors(r, user); len(m) > 0 {
+		return m
+	}
+	return []string{"password"}
 }
 
 // requireStepUp lets a change through when the session confirmed a second
 // factor (or the password, without one) in the last few minutes.
-func (s *server) requireStepUp(w http.ResponseWriter, p *principal) bool {
+func (s *server) requireStepUp(w http.ResponseWriter, r *http.Request, p *principal) bool {
 	if p.viaToken() || s.st.steppedUp(p.session, s.now()) {
 		return true
 	}
-	w.Header().Set("X-Pxmxfw-Stepup", s.stepUpMethod(p.user))
+	w.Header().Set("X-Pxmxfw-Stepup", strings.Join(s.stepUpMethods(r, p.user), ","))
 	text(w, http.StatusForbidden, "confirm this change first\n")
 	return false
 }
@@ -335,20 +393,23 @@ func (s *server) stepUp(w http.ResponseWriter, r *http.Request, p *principal, bo
 		text(w, http.StatusTooManyRequests, "too many failed attempts, try again in a few minutes\n")
 		return
 	}
+	methods := s.stepUpMethods(r, p.user)
 	ok := false
-	switch s.stepUpMethod(p.user) {
-	case "totp":
+	switch {
+	case slices.Contains(methods, "webauthn") && c.Flow != "":
+		ok = s.finishAssertion(r, "stepup", p.user, p.session, c.Flow, c.Assertion) == nil
+	case slices.Contains(methods, "totp") && c.Code != "":
 		secret, _ := s.st.totpSecret(p.user)
 		step, match := totpMatch(secret, c.Code, now)
 		ok = match && s.st.useTOTPStep(p.user, step)
-	default:
+	case slices.Contains(methods, "password"):
 		ok = c.Password != "" && s.auth.Authenticate(p.user, c.Password) == nil
 	}
 	if !ok {
 		s.limit.fail(lk)
 		s.st.log(now, p.user, "confirm", "failed from "+clientIP(r))
 		time.Sleep(failDelay)
-		text(w, http.StatusForbidden, "wrong code or password\n")
+		text(w, http.StatusForbidden, "not confirmed: wrong key, code or password\n")
 		return
 	}
 	s.limit.reset(lk)
@@ -392,7 +453,7 @@ func (s *server) totpEnable(w http.ResponseWriter, p *principal, body []byte) {
 	text(w, http.StatusOK, "two-factor login enabled\n")
 }
 
-func (s *server) me(w http.ResponseWriter, p *principal) {
+func (s *server) me(w http.ResponseWriter, r *http.Request, p *principal) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "user=%s\nvia=%s\n", p.user, p.scope)
 	if !p.viaToken() {
@@ -403,7 +464,12 @@ func (s *server) me(w http.ResponseWriter, p *principal) {
 		} else if secret != "" {
 			state = "pending"
 		}
-		fmt.Fprintf(&b, "totp=%s\nconfirm=%s\n", state, s.stepUpMethod(p.user))
+		fmt.Fprintf(&b, "totp=%s\nconfirm=%s\n", state, strings.Join(s.stepUpMethods(r, p.user), ","))
+		if _, rpid, err := rpFor(r); err == nil {
+			fmt.Fprintf(&b, "keys=%d\nrpid=%s\n", s.st.keyCount(p.user, rpid), rpid)
+		} else {
+			fmt.Fprintf(&b, "keys_unavailable=%s\n", err)
+		}
 		var until int64
 		s.st.db.QueryRow(`SELECT stepup_until FROM sessions WHERE token_hash = ?`, hashToken(p.session)).Scan(&until)
 		if left := until - s.now().Unix(); left > 0 {

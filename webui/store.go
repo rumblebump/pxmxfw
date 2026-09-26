@@ -41,7 +41,7 @@ func openStore(path string) (*store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema + schemaAuth); err != nil {
+	if _, err := db.Exec(schema + schemaAuth + schemaWebAuthn); err != nil {
 		db.Close()
 		return nil, err
 	}
