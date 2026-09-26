@@ -155,7 +155,8 @@ settings_write() { # write current settings to stdout
 
 # ---- interfaces -------------------------------------------------------------
 # One line per network interface:
-#   IFACE role=ROLE [addr=A] [addr6=A] [dhcp=START-END] [allow=LIST]
+#   IFACE role=ROLE [addr=A] [addr6=A] [dhcp=START-END] [lease=TIME]
+#         [dns=IP,IP] [gateway=IP|none] [allow=LIST]
 #         [type=vlan link=IFACE vid=N | type=bridge [ports=IFACE,IFACE]] [# comment]
 # role:  wan       the uplink, exactly one, addresses always set by Proxmox
 #        lan       trusted: reaches WAN and every other lan interface
@@ -164,6 +165,10 @@ settings_write() { # write current settings to stdout
 # addr:  proxmox (default: Proxmox sets it), none, or IPv4/prefix set by pxmxfw
 # addr6: same for IPv6, used only when IPV6=yes
 # dhcp:  IPv4 range dnsmasq hands out on this interface (implies allow dhcp,dns)
+# lease: DHCP lease time on this interface (default: DHCP_LEASE)
+# dns:   DNS servers DHCP hands out here (default: the firewall itself)
+# gateway: default route DHCP hands out here (default: the firewall itself;
+#        none: clients get no default route)
 # allow: what lan and isolated interfaces may reach on the firewall itself:
 #        none or a comma list of ping,ssh,dns,dhcp,webui. Without allow= all
 #        of them (how interfaces from the first boot start); interfaces added
@@ -175,7 +180,8 @@ settings_write() { # write current settings to stdout
 ALLOW_ALL=ping,ssh,dns,dhcp,webui
 
 # ifaces_each FILE CALLBACK: validate the interfaces file and call CALLBACK
-# with: name role addr addr6 dhcp comment type link vid ports allow. With
+# with: name role addr addr6 dhcp comment type link vid ports allow lease
+# dns gateway. With
 # CALLBACK "-" only validates. Also sets WAN_IF, LAN_IFS (role lan), ISO_IFS
 # (role isolated), IN_IFS (both), ALLOW_<SERVICE>_IFS (inside interfaces that
 # may reach SERVICE), VLANS ("name:link:vid ..."), BRIDGES ("name:p1,p2 ..."),
@@ -202,8 +208,16 @@ ifaces_each() {
 		case $_seen in *" $_name "*) err "$_f" "$_n" "$_name listed twice"; continue ;; esac
 		_seen="$_seen$_name "
 		_role='' _addr=proxmox _addr6=proxmox _dhcp='' _bad='' _type='' _link='' _vid='' _ports='' _allow=-
+		_lease='' _dns='' _gw=''
 		for _kv; do
 			case $_kv in
+				lease=*) is_lease "${_kv#lease=}" && _lease=${_kv#lease=} || _bad="lease: e.g. 12h, 30m, 1d or infinite" ;;
+				dns=*)
+					_dns=${_kv#dns=}
+					for _d in $(echo "$_dns" | tr ',' ' '); do is_ipv4 "$_d" || _bad="dns: IPv4 addresses separated by commas"; done
+					case $_dns in ''|,*|*,|*,,*) _bad="dns: IPv4 addresses separated by commas" ;; esac ;;
+				gateway=none) _gw=none ;;
+				gateway=*) is_ipv4 "${_kv#gateway=}" && _gw=${_kv#gateway=} || _bad="gateway: an IPv4 address or none" ;;
 				type=vlan|type=bridge) _type=${_kv#type=} ;;
 				link=*) is_iface "${_kv#link=}" && _link=${_kv#link=} || _bad="link: an interface name" ;;
 				vid=*) _vid=${_kv#vid=}; { is_uint "$_vid" && [ "$_vid" -ge 1 ] && [ "$_vid" -le 4094 ]; } || _bad="vid: 1 to 4094" ;;
@@ -232,7 +246,7 @@ ifaces_each() {
 		[ -n "$_role" ] || _bad="needs role=wan, lan, isolated or off"
 		if [ -z "$_bad" ] && [ "$_role" = wan ]; then
 			[ "$_addr" = proxmox ] && [ "$_addr6" = proxmox ] || _bad="the WAN address is set in Proxmox (addr=proxmox)"
-			[ -z "$_dhcp" ] || _bad="no DHCP server on WAN"
+			[ -z "$_dhcp$_lease$_dns$_gw" ] || _bad="no DHCP server on WAN"
 			[ -z "$WAN_IF" ] || _bad="only one interface can be wan"
 			[ "$_allow" = - ] || _bad="allow= is not for the WAN (use WAN_PING and services)"
 			[ -z "$_type" ] || _bad="the WAN is a NIC from Proxmox"
@@ -266,7 +280,7 @@ ifaces_each() {
 			vlan) VLANS="$VLANS $_name:$_link:$_vid" ;;
 			bridge) BRIDGES="$BRIDGES $_name:$_ports" ;;
 		esac
-		[ "$_cb" = - ] || "$_cb" "$_name" "$_role" "$_addr" "$_addr6" "$_dhcp" "$_c" "$_type" "$_link" "$_vid" "$_ports" "$_allow"
+		[ "$_cb" = - ] || "$_cb" "$_name" "$_role" "$_addr" "$_addr6" "$_dhcp" "$_c" "$_type" "$_link" "$_vid" "$_ports" "$_allow" "$_lease" "$_dns" "$_gw"
 	done < "$_f"
 	LAN_IFS=${LAN_IFS# } ISO_IFS=${ISO_IFS# } IN_IFS=${IN_IFS# } VLANS=${VLANS# } BRIDGES=${BRIDGES# } IF_ROLES=${IF_ROLES# }
 	ALLOW_PING_IFS=${ALLOW_PING_IFS# } ALLOW_SSH_IFS=${ALLOW_SSH_IFS# } ALLOW_DNS_IFS=${ALLOW_DNS_IFS# }
@@ -595,11 +609,19 @@ _d_host() { # ip name mac comment
 	printf 'host-record=%s,%s\n' "$2" "$1"
 	case $3 in *:*) printf 'dhcp-host=%s,%s,%s\n' "$3" "$1" "$2" ;; esac
 }
-_d_iface() { # name role addr addr6 dhcp comment type link vid ports allow
+_d_iface() { # name role addr addr6 dhcp comment type link vid ports allow lease dns gateway
 	case $2 in lan|isolated) ;; *) return 0 ;; esac
 	case ,${11}, in *,dns,*|*,dhcp,*) ;; *) return 0 ;; esac
 	echo "interface=$1"
-	[ -z "$5" ] || echo "dhcp-range=set:$1,${5%-*},${5#*-},$DHCP_LEASE"
+	if [ -n "$5" ]; then
+		echo "dhcp-range=set:$1,${5%-*},${5#*-},${12:-$DHCP_LEASE}"
+		[ -z "${13}" ] || echo "dhcp-option=tag:$1,option:dns-server,${13}"
+		case ${14} in
+			'') ;;
+			none) echo "dhcp-option=tag:$1,option:router" ;;
+			*) echo "dhcp-option=tag:$1,option:router,${14}" ;;
+		esac
+	fi
 	if [ "$IPV6" = yes ] && [ "$4" != none ]; then
 		echo "dhcp-range=::,constructor:$1,ra-stateless,ra-names"
 	fi
