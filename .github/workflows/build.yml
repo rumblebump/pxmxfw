@@ -23,8 +23,10 @@ jobs:
         run: |
           sudo mkdir /tmp/fw
           sudo tar -xzf out/*.tar.gz -C /tmp/fw
+          sudo mount --bind /dev /tmp/fw/dev
           sudo chroot /tmp/fw nft -c -f /etc/nftables.nft
           sudo chroot /tmp/fw dnsmasq --test
+          sudo umount /tmp/fw/dev
           ls -l out/
 
       - uses: actions/upload-artifact@v4
