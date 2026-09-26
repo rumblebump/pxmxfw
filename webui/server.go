@@ -195,6 +195,8 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 		s.st.endSession(p.session)
 		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		text(w, http.StatusOK, "logged out\n")
+	case "GET:propose-subnet":
+		s.proposeSubnet(w, p, name)
 	case "GET:pkgs":
 		s.run(w, "pkg-list")
 	case "GET:pkg-search":

@@ -73,6 +73,20 @@ expect_invalid interfaces "$(printf '%s\neth2 role=lan dhcp=10.0.2.100' "$I2")"
 expect_invalid interfaces "$(printf '%s\neth2 role=router' "$I2")"
 expect_invalid interfaces "$(printf '%s\neth2 role=lan mtu=9000' "$I2")"
 expect_invalid interfaces "$(printf '%s\neth2;x role=lan' "$I2")"
+expect_valid interfaces "$(printf '%s\nvl10 role=lan type=vlan link=eth1 vid=10 addr=10.0.10.1/24 allow=ping' "$I2")"
+expect_valid interfaces "$(printf '%s\nbr0 role=lan type=bridge ports=eth2,eth3 allow=ping,dns\neth2 role=off\neth3 role=off' "$I2")"
+expect_valid interfaces "$(printf '%s\nbr0 role=isolated type=bridge allow=none' "$I2")"
+expect_invalid interfaces "$(printf '%s\nvl10 role=lan type=vlan link=eth1' "$I2")"              # no vid
+expect_invalid interfaces "$(printf '%s\nvl10 role=lan type=vlan link=eth1 vid=4095' "$I2")"
+expect_invalid interfaces "$(printf '%s\nvl10 role=lan type=vlan link=eth9 vid=10' "$I2")"      # parent not listed
+expect_invalid interfaces "$(printf '%s\nvl10 role=lan vid=10' "$I2")"                          # vid without type=vlan
+expect_invalid interfaces "$(printf '%s\nbr0 role=lan type=bridge ports=eth1' "$I2")"           # port has a role
+expect_invalid interfaces "$(printf '%s\nbr0 role=lan type=bridge ports=eth2\nbr1 role=lan type=bridge ports=eth2\neth2 role=off' "$I2")"
+expect_invalid interfaces "$(printf '%s\nbr0 role=lan type=bridge ports=eth2,' "$I2")"
+expect_invalid interfaces "$(printf '%s\neth2 role=lan allow=ftp' "$I2")"
+expect_invalid interfaces "$(printf '%s\neth2 role=lan allow=ping;reboot' "$I2")"
+expect_invalid interfaces 'eth0 role=wan allow=ping'
+expect_invalid interfaces 'eth0 role=wan type=bridge' 
 
 expect_valid services 'tcp 22'
 expect_valid services 'udp 60000-60100 # mosh'
@@ -112,8 +126,11 @@ fresh_etc "$T/etc"
 check_ruleset default
 grep -q 'oifname "eth0" masquerade' "$T/default.nft" && ok || bad "default has NAT"
 grep -q 'iifname { "eth1" } oifname "eth0" meta nfproto ipv4 accept' "$T/default.nft" && ok || bad "default routes LAN to WAN, IPv4 only"
-grep -q 'iifname { "eth1" } tcp dport { 22, 53, 8443 }' "$T/default.nft" && ! grep -q 'iifname "eth0" tcp dport 8443' "$T/default.nft" && ok ||
+grep -q 'iifname { "eth1" } tcp dport 8443 accept' "$T/default.nft" && ! grep -q 'iifname "eth0" tcp dport 8443' "$T/default.nft" && ok ||
 	bad "web UI open on LAN only"
+grep -q 'iifname { "eth1" } tcp dport 22 accept' "$T/default.nft" && grep -q 'iifname { "eth1" } udp dport 67 accept' "$T/default.nft" &&
+	grep -q 'iifname { "eth1" } meta l4proto { tcp, udp } th dport 53 accept' "$T/default.nft" && ok || bad "first-boot LAN allows ssh, dns, dhcp"
+grep -q 'iifname "eth0" icmp type echo-request accept' "$T/default.nft" && ok || bad "WAN answers ping by default"
 
 printf 'tcp 22 # ssh\nudp 60000-60100\n' >> "$T/etc/services"
 printf 'tcp 8443 192.168.10.10 443 # web\nudp 51820 192.168.10.11 51820\n' >> "$T/etc/forwards"
@@ -129,7 +146,17 @@ check_ruleset variants
 grep -q masquerade "$T/variants.nft" && bad "NAT=no still masquerades" || ok
 grep -q 'iifname "eth0" tcp dport 8443 accept' "$T/variants.nft" && ok || bad "WEBUI_WAN opens the UI on WAN"
 grep -q 'nfproto ipv4 accept' "$T/variants.nft" && bad "IPV6=yes still limits forwarding to IPv4" || ok
-grep -q 'udp dport { 53, 67, 547 }' "$T/variants.nft" && ok || bad "IPV6=yes allows DHCPv6 from inside"
+grep -q 'udp dport { 67, 547 }' "$T/variants.nft" && ok || bad "IPV6=yes allows DHCPv6 from inside"
+grep -q 'iifname "eth0" icmp' "$T/variants.nft" && bad "WAN_PING=no still answers ping on WAN" || ok
+
+# allow= limits what an inside interface reaches on the firewall
+printf 'eth0 role=wan\neth1 role=lan\nvl10 role=lan type=vlan link=eth1 vid=10 addr=10.0.10.1/24 allow=ping\nbr0 role=isolated type=bridge ports=eth2 addr=10.0.20.1/24 allow=none dhcp=10.0.20.100-10.0.20.200\neth2 role=off\n' > "$T/etc/interfaces"
+check_ruleset allow
+grep -q 'iifname { "eth1", "vl10" } icmp type echo-request accept' "$T/allow.nft" && ok || bad "allow=ping: $(grep icmp "$T/allow.nft")"
+grep -q 'iifname { "eth1" } tcp dport 22' "$T/allow.nft" && ok || bad "allow=ping gives no ssh"
+grep -q 'iifname { "eth1", "br0" } udp dport' "$T/allow.nft" && grep -q 'iifname { "eth1", "br0" } meta l4proto' "$T/allow.nft" && ok ||
+	bad "dhcp= implies dhcp and dns: $(cat "$T/allow.nft")"
+grep -q 'iifname { "eth1", "vl10" } oifname { "eth1", "vl10" }' "$T/allow.nft" && ok || bad "a new lan interface is routed"
 
 printf 'eth0 role=wan\neth1 role=off\n' > "$T/etc/interfaces"
 check_ruleset nolan
@@ -146,6 +173,12 @@ grep -qx 'interface=eth1' "$T/dnsmasq.conf" && grep -qx 'interface=eth2' "$T/dns
 grep -qx 'dhcp-range=set:eth1,192.168.10.100,192.168.10.200,12h' "$T/dnsmasq.conf" && ok || bad "dnsmasq DHCP range"
 grep -q 'ra-stateless' "$T/dnsmasq.conf" && bad "IPV6=no still sends router advertisements" || ok
 grep -qx 'dhcp-host=52:54:00:12:34:56,192.168.10.10,nas' "$T/dnsmasq.conf" && ok || bad "dnsmasq static lease"
+printf 'eth0 role=wan\neth1 role=lan\neth2 role=lan addr=10.0.2.1/24 allow=ping\n' > "$T/etc/interfaces"
+PXMXFW_ETC=$T/etc "$PXMXFW" render dnsmasq > "$T/dnsmasq2.conf" 2>&1
+grep -qx 'interface=eth1' "$T/dnsmasq2.conf" && ! grep -q 'interface=eth2' "$T/dnsmasq2.conf" && ok || bad "dnsmasq skips allow=ping interfaces"
+printf 'eth0 role=wan\neth1 role=lan allow=ping\n' > "$T/etc/interfaces"
+PXMXFW_ETC=$T/etc "$PXMXFW" render dnsmasq > /dev/null 2>&1 && bad "DNSMASQ=yes with no dns interface accepted" || ok
+printf 'eth0 role=wan\neth1 role=lan dhcp=192.168.10.100-192.168.10.200\neth2 role=isolated addr=10.0.2.1/24 addr6=none\n' > "$T/etc/interfaces"
 sed -i 's/^IPV6=.*/IPV6=yes/' "$T/etc/pxmxfw.conf"
 PXMXFW_ETC=$T/etc "$PXMXFW" render dnsmasq > "$T/dnsmasq.conf"
 grep -qx 'dhcp-range=::,constructor:eth1,ra-stateless,ra-names' "$T/dnsmasq.conf" && ! grep -q 'constructor:eth2' "$T/dnsmasq.conf" &&
@@ -235,6 +268,24 @@ if [ -n "$NFT" ]; then
 		ok || bad "apply: IPv4 forwarding on, IPv6 off"
 fi
 
+# VLANs and bridges: created, marked as pxmxfw's, and removed when unlisted
+mkdir -p "$T/sys/eth3" "$T/sys/vlold"
+echo pxmxfw > "$T/sys/vlold/ifalias"
+printf 'eth0 role=wan\neth1 role=lan\neth2 role=lan addr=10.0.2.1/24\nvl10 role=lan type=vlan link=eth1 vid=10 addr=10.0.10.1/24 allow=ping\nbr0 role=lan type=bridge ports=eth3,vl10b addr=10.0.30.1/24\neth3 role=off\nvl10b role=off type=vlan link=eth1 vid=11\n' > "$T/etc/interfaces"
+: > "$T/ip.log"
+if [ -n "$NFT" ]; then
+	unshare -n sh -c "$apply_env '$PXMXFW' apply" > "$T/out" 2>&1 && ok || bad "apply with vlan and bridge: $(cat "$T/out")"
+	grep -qx 'ip link add link eth1 name vl10 type vlan id 10' "$T/ip.log" && grep -qx 'ip link set dev vl10 alias pxmxfw' "$T/ip.log" &&
+		ok || bad "vlan created: $(cat "$T/ip.log")"
+	grep -qx 'ip link add name br0 type bridge' "$T/ip.log" && grep -qx 'ip link set dev eth3 master br0' "$T/ip.log" && ok ||
+		bad "bridge created with its port"
+	[ "$(grep -n 'vl10b type vlan' "$T/ip.log" | cut -d: -f1)" -lt "$(grep -n 'name br0 type bridge' "$T/ip.log" | cut -d: -f1)" ] &&
+		ok || bad "a VLAN that is a bridge port is created first"
+	grep -qx 'ip link del dev vlold' "$T/ip.log" && ok || bad "unlisted pxmxfw link removed"
+	grep -q 'link del dev eth' "$T/ip.log" && bad "apply deleted a Proxmox NIC" || ok
+fi
+rm -rf "$T/sys/eth3" "$T/sys/vlold"
+
 # ---- WireGuard ------------------------------------------------------------------
 
 K1=aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Qga2V5MTE=
@@ -309,6 +360,31 @@ grep -qx "private=$K2" "$T/out" && grep -qx "public=$K1" "$T/out" && ok || bad "
 env PATH="$T/ipbin:$PATH" PXMXFW_ETC="$T/etc" PXMXFW_SYSNET="$T/sys" PXMXFW_PROCSYS="$T/procsys" "$PXMXFW" status > "$T/out" 2>&1
 grep -q "^wg=wg0 .* 51820 present" "$T/out" && ok || bad "status lists the tunnel: $(cat "$T/out")"
 grep -q "$K2" "$T/out" && bad "status leaks the private key" || ok
+
+# A real VLAN and bridge, when this kernel can make them (e.g. in CI)
+if [ -n "$NFT" ] && unshare -n sh -c 'ip link add d0 type dummy && ip link add link d0 name d0.5 type vlan id 5 && ip link add b0 type bridge' 2>/dev/null; then
+	fresh_etc "$T/etc"
+	printf 'eth0 role=wan\neth1 role=lan addr=192.168.10.1/24\nvl10 role=lan type=vlan link=eth1 vid=10 addr=10.0.10.1/24 allow=ping\nbr0 role=lan type=bridge ports=eth3 addr=10.0.30.1/24\neth3 role=off\n' > "$T/etc/interfaces"
+	PXMXFW_ETC=$T/etc "$PXMXFW" render nft > "$T/etc/ruleset.nft"
+	cat > "$T/links.sh" <<EOF
+mount -t sysfs sysfs /sys
+ip link add eth1 type dummy && ip link add eth3 type dummy
+export PXMXFW_ETC='$T/etc' PXMXFW_PROCSYS='$T/procsys' PXMXFW_NFT_MAIN='$T/main.nft' PXMXFW_DNSMASQ_CONF='$T/dnsmasq.conf'
+'$PXMXFW' apply > /dev/null || exit 1
+ip -d link show dev vl10; ip -4 addr show dev vl10; ip link show dev eth3; ip -4 addr show dev br0
+sed -i '/^vl10 /d' '$T/etc/interfaces'
+'$PXMXFW' apply > /dev/null || exit 1
+ip link show dev vl10 2>/dev/null && echo "vl10 still there"
+ip link show dev eth1 > /dev/null || echo "eth1 was removed"
+EOF
+	if unshare -nm sh "$T/links.sh" > "$T/out" 2>&1 &&
+		grep -q 'vl10@eth1' "$T/out" && grep -q 'vlan protocol 802.1Q id 10' "$T/out" && grep -q '10.0.10.1/24' "$T/out" &&
+		grep -q 'master br0' "$T/out" && grep -q '10.0.30.1/24' "$T/out" &&
+		! grep -q 'still there\|was removed' "$T/out"; then ok
+	else bad "real VLAN and bridge: $(cat "$T/out")"; fi
+else
+	echo "note: cannot create VLAN or bridge interfaces here, skipping that test"
+fi
 
 # A real tunnel, when this kernel and system can make one (e.g. in CI)
 if [ -n "$NFT" ] && command -v wg >/dev/null && [ "$(command -v wg)" != "$T/ipbin/wg" ] &&

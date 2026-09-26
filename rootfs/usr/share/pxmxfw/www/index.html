@@ -94,15 +94,20 @@
 	<section x-show="tab === 'interfaces'">
 		<h2>Interfaces</h2>
 		<p class="muted">
-			The WAN (eth0) gets its address from Proxmox. NICs you add to the container show up here switched off; give them a role to use them.
+			The WAN (eth0) gets its address from Proxmox. NICs you add to the container in Proxmox show up here switched off; give them a role to use them.
+			Interfaces you add here start as <b>lan</b>.
 			<b>lan</b> reaches WAN and the other lans, <b>isolated</b> reaches WAN only, <b>off</b> drops everything.
+			<b>Allows</b> is what an interface may reach on the firewall itself.
 		</p>
 		<table>
-			<tr><th>Interface</th><th>Role</th><th>IPv4</th><th x-show="ipv6()">IPv6</th><th>DHCP range</th><th>Comment</th></tr>
+			<tr><th>Interface</th><th>Role</th><th>IPv4</th><th x-show="ipv6()">IPv6</th><th>DHCP range</th><th>Allows</th><th>Comment</th><th></th></tr>
 			<template x-for="r in ifaces" :key="r.name">
 				<tr>
 					<td>
 						<b x-text="r.name"></b>
+						<div class="hint" x-show="r.type === 'vlan'" x-text="`VLAN ${r.vid} on ${r.link}`"></div>
+						<div class="hint" x-show="r.type === 'bridge'" x-text="`bridge: ${r.ports.split(',').filter(Boolean).join(', ') || 'no ports'}`"></div>
+						<div class="hint" x-show="bridgeOf(r.name)" x-text="`port of ${(bridgeOf(r.name) || {}).name}`"></div>
 						<div class="hint" x-text="nowOf(r)"></div>
 					</td>
 					<td>
@@ -129,11 +134,72 @@
 							<input x-model="r.dhcpEnd" placeholder="end" size="13">
 						</div>
 					</td>
+					<td>
+						<div x-show="r.role === 'lan' || r.role === 'isolated'" class="allow">
+							<template x-for="a in ALLOW" :key="a">
+								<label class="check"><input type="checkbox" :checked="r.allow.includes(a)" @change="toggleAllow(r, a, $event)"> <span x-text="a === 'webui' ? 'web UI' : a"></span></label>
+							</template>
+						</div>
+					</td>
 					<td><input x-model="r.comment"></td>
+					<td><button class="link" x-show="r.type" @click="removeIface(r)">Remove</button></td>
 				</tr>
 			</template>
 		</table>
-		<p class="muted" x-show="!settings.DNSMASQ || settings.DNSMASQ === 'no'">DHCP ranges are used once dnsmasq is turned on under DNS &amp; DHCP.</p>
+		<p class="muted" x-show="!settings.DNSMASQ || settings.DNSMASQ === 'no'">DHCP ranges are used once dnsmasq is turned on under DNS &amp; DHCP. A DHCP range also allows DNS and DHCP.</p>
+
+		<div class="actions" x-show="!adding"><button @click="startAdd()">Add interface</button></div>
+		<div class="form card" x-show="adding">
+			<template x-if="adding">
+				<div>
+					<h3>Add interface</h3>
+					<label>Kind
+						<select x-model="adding.kind" @change="addKind()">
+							<option value="vlan" :disabled="!feature('vlan')">VLAN</option>
+							<option value="bridge" :disabled="!feature('bridge')">Bridge</option>
+							<option value="wireguard" :disabled="!feature('wireguard')">WireGuard tunnel</option>
+						</select>
+					</label>
+					<p class="hint" x-show="!feature('vlan') || !feature('bridge') || !feature('wireguard')">
+						Kinds whose kernel module is not loaded on the Proxmox host are greyed out; the Checks page shows how to load them.
+					</p>
+					<template x-if="adding.kind === 'vlan'">
+						<div>
+							<label>On <select x-model="adding.link" @change="addVlanName()"><template x-for="n in vlanParents()" :key="n"><option :value="n" x-text="n" :selected="n === adding.link"></option></template></select></label>
+							<label>VLAN ID <input type="number" min="1" max="4094" x-model="adding.vid" @input="addVlanName()"></label>
+						</div>
+					</template>
+					<template x-if="adding.kind === 'bridge'">
+						<div>
+							<p class="hint">Ports: NICs that are switched off. They join the bridge and the bridge gets the role and address.</p>
+							<template x-for="n in bridgeCandidates()" :key="n">
+								<label class="check"><input type="checkbox" :value="n" x-model="adding.ports"> <span x-text="n"></span></label>
+							</template>
+						</div>
+					</template>
+					<template x-if="adding.kind !== 'wireguard'">
+						<div>
+							<label>Name <input x-model="adding.name" maxlength="15"></label>
+							<label>IPv4 address <input x-model="adding.addr" placeholder="10.20.1.1/24"></label>
+							<label class="check"><input type="checkbox" x-model="adding.dhcp"> DHCP (.100 to .200)</label>
+							<label>Comment <input x-model="adding.comment"></label>
+						</div>
+					</template>
+					<p class="hint" x-show="adding.kind === 'wireguard'">Adds a tunnel and opens the WireGuard page to set it up.</p>
+					<p class="hint">It starts as <b>lan</b> (routed to the other lans and WAN) and answers ping only; change that in the table.</p>
+					<div class="actions">
+						<button class="primary" @click="finishAdd()">Add</button>
+						<button @click="adding = null">Cancel</button>
+					</div>
+				</div>
+			</template>
+		</div>
+		<div class="form">
+			<label>Subnet pool for new interfaces
+				<input x-model="subnetPool" placeholder="10.20.0.0/16" @change="savePool()">
+			</label>
+			<p class="hint">New interfaces get the first free /24 of this pool.</p>
+		</div>
 
 		<h2>IPv6</h2>
 		<div class="form">
@@ -151,7 +217,7 @@
 			<label>Web UI port <input type="number" min="1" max="65535" x-model="settings.WEBUI_PORT"></label>
 			<label class="check"><input type="checkbox" :checked="settings.WEBUI_WAN === 'yes'" @change="yn('WEBUI_WAN', $event)"> Allow the web UI from WAN</label>
 		</div>
-		<p class="muted">From lan and isolated interfaces, SSH, DNS, DHCP and the web UI are always allowed. Everything else coming in from WAN is dropped unless listed below.</p>
+		<p class="muted">What lan and isolated interfaces may reach on the firewall itself (ping, SSH, DNS, DHCP, the web UI) is set per interface under Interfaces. Everything else coming in from WAN is dropped unless listed below.</p>
 
 		<h2>Open on WAN</h2>
 		<table>
