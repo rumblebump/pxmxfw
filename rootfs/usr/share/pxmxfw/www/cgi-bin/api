@@ -3,11 +3,12 @@
 #
 #   GET  ?action=status              key=value lines
 #   GET  ?action=check               tab separated checks, see "pxmxfw check --tsv"
-#   GET  ?action=file&name=NAME      raw config file (settings|interfaces|services|forwards|hosts);
+#   GET  ?action=file&name=NAME      raw config file (settings|interfaces|services|forwards|hosts|wireguard);
 #                                    for interfaces, newly added NICs are detected first
 #   GET  ?action=leases              dnsmasq leases
 #   POST ?action=save&name=NAME      body replaces the file after validation
 #   POST ?action=apply               runs "pxmxfw apply"
+#   POST ?action=wgkeypair           a new WireGuard key pair for a peer (not stored)
 #
 # POST requests must carry an "X-Pxmxfw: 1" header. Browsers do not send
 # custom headers cross-site without a CORS preflight, which this never
@@ -39,7 +40,7 @@ IFS=$old_ifs
 file_for() {
 	case $1 in
 		settings) echo "$PXMXFW_ETC/pxmxfw.conf" ;;
-		interfaces|services|forwards|hosts) echo "$PXMXFW_ETC/$1" ;;
+		interfaces|services|forwards|hosts|wireguard) echo "$PXMXFW_ETC/$1" ;;
 		*) return 1 ;;
 	esac
 }
@@ -82,5 +83,8 @@ case ${REQUEST_METHOD:-GET}:$action in
 		else
 			printf '%s\n' "$out" | respond "500 Internal Server Error"
 		fi ;;
+	POST:wgkeypair)
+		head -c "$len" > /dev/null
+		"$PXMXFW" wg-keypair 2>&1 | respond "200 OK" ;;
 	*) fail "404 Not Found" "unknown action" ;;
 esac
