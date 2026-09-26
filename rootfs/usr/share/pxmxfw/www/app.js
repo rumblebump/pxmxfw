@@ -1,7 +1,17 @@
-// pxmxfw web UI. The backend (cgi-bin/api) speaks plain text: settings are
-// KEY=value lines, rule files are whitespace separated with "# comment".
+// pxmxfw web UI. The backend (pxmxfw-webui, /api) speaks plain text:
+// settings are KEY=value lines, rule files are whitespace separated with
+// "# comment".
 
-const API = 'cgi-bin/api';
+const API = 'api';
+
+class ApiError extends Error {
+	constructor(message, res) {
+		super(message);
+		this.status = res.status;
+		this.stepup = res.headers.get('X-Pxmxfw-Stepup');
+		this.need = res.headers.get('X-Pxmxfw-Need');
+	}
+}
 
 async function api(action, { name, body } = {}) {
 	const q = new URLSearchParams({ action });
@@ -13,8 +23,12 @@ async function api(action, { name, body } = {}) {
 	};
 	const res = await fetch(`${API}?${q}`, opts);
 	const text = await res.text();
-	if (!res.ok) throw new Error(text.trim() || `${res.status} ${res.statusText}`);
+	if (!res.ok) throw new ApiError(text.trim() || `${res.status} ${res.statusText}`, res);
 	return text;
+}
+
+function date(unix) {
+	return new Date(Number(unix) * 1000).toLocaleString();
 }
 
 function lines(text) {
@@ -83,7 +97,18 @@ document.addEventListener('alpine:init', () => {
 			{ id: 'firewall', label: 'Firewall' },
 			{ id: 'dns', label: 'DNS & DHCP' },
 			{ id: 'checks', label: 'Checks' },
+			{ id: 'security', label: 'Security' },
 		],
+		authed: null,
+		login: { user: 'root', password: '', code: '', needCode: false, error: '' },
+		confirmBox: { open: false, method: '', value: '', error: '' },
+		me: {},
+		totpSetup: null,
+		totpCode: '',
+		tokens: [],
+		newToken: { name: '', scope: 'write', days: 365 },
+		createdToken: '',
+		audit: [],
 		tab: 'status',
 		busy: false,
 		message: { text: '', kind: '' },
@@ -98,14 +123,127 @@ document.addEventListener('alpine:init', () => {
 		ctidValue: '',
 
 		async init() {
-			try { this.ctidValue = localStorage.getItem('pxmxfw.ctid') || ''; } catch (e) { /* no storage */ }
-			await this.refresh();
-			await this.loadConfig();
+			try {
+				await api('me');
+				await this.start();
+			} catch (e) {
+				this.authed = false;
+			}
+		},
+
+		async start() {
+			this.authed = true;
+			this.login.password = this.login.code = this.login.error = '';
+			this.login.needCode = false;
+			await Promise.all([this.refresh(), this.loadConfig(), this.loadSecurity()]);
+			try { this.ctidValue = parseKV(await this.call('prefs')).ctid || ''; } catch (e) { /* not important */ }
+		},
+
+		async doLogin() {
+			this.login.error = '';
+			try {
+				await api('login', { body: JSON.stringify({ user: this.login.user, password: this.login.password, code: this.login.code }) });
+				await this.start();
+			} catch (e) {
+				if (e.need === 'totp') this.login.needCode = true;
+				else this.login.error = e.message;
+			}
+		},
+
+		async logout() {
+			try { await api('logout', { body: '' }); } catch (e) { /* session already gone */ }
+			this.authed = false;
+		},
+
+		// call() is api() plus the login and confirm prompts: an expired session
+		// shows the login form, and a change that needs confirming asks for the
+		// TOTP code (or password) and is then retried once.
+		async call(action, opts = {}) {
+			try {
+				return await api(action, opts);
+			} catch (e) {
+				if (e.status === 401) this.authed = false;
+				if (e.status !== 403 || !e.stepup) throw e;
+				await this.confirm(e.stepup);
+				return await api(action, opts);
+			}
+		},
+
+		confirm(method) {
+			return new Promise((resolve, reject) => {
+				this.confirmBox = { open: true, method, value: '', error: '', resolve, reject };
+			});
+		},
+		async submitConfirm() {
+			const b = this.confirmBox;
+			const body = b.method === 'totp' ? { code: b.value } : { password: b.value };
+			try {
+				await api('stepup', { body: JSON.stringify(body) });
+				b.open = false;
+				b.resolve();
+			} catch (e) {
+				b.error = e.message;
+				b.value = '';
+			}
+		},
+		cancelConfirm() {
+			this.confirmBox.open = false;
+			this.confirmBox.reject(new Error('Not confirmed.'));
+		},
+
+		async loadSecurity() {
+			try {
+				const [me, tk, au] = await Promise.all([this.call('me'), this.call('tokens'), this.call('audit')]);
+				this.me = parseKV(me);
+				this.tokens = lines(tk).map(l => {
+					const [id, name, scope, created, expires, used] = l.split('\t');
+					return { id, name, scope, created: date(created), expires: date(expires), used: used === '0' ? 'never' : date(used) };
+				});
+				this.audit = lines(au).map(l => {
+					const [ts, user, action, detail] = l.split('\t');
+					return { ts: date(ts), user, action, detail };
+				});
+			} catch (e) {
+				this.show('fail', `Could not load the security settings: ${e.message}`);
+			}
+		},
+
+		async startTotp() {
+			try {
+				this.totpSetup = parseKV(await this.call('totp-setup', { body: '' }));
+				this.totpCode = '';
+			} catch (e) { this.show('fail', e.message); }
+		},
+		async enableTotp() {
+			try {
+				await this.call('totp-enable', { body: JSON.stringify({ code: this.totpCode }) });
+				this.totpSetup = null;
+				this.show('ok', 'Two-factor login is on. Changes are now confirmed with a code from your app.');
+			} catch (e) { this.show('fail', e.message); }
+			await this.loadSecurity();
+		},
+		async disableTotp() {
+			try {
+				await this.call('totp-disable', { body: '' });
+				this.show('ok', 'Two-factor login is off.');
+			} catch (e) { this.show('fail', e.message); }
+			await this.loadSecurity();
+		},
+		async createToken() {
+			try {
+				this.createdToken = (await this.call('token-create', { body: JSON.stringify({ ...this.newToken, days: Number(this.newToken.days) }) })).trim();
+				this.newToken.name = '';
+			} catch (e) { this.show('fail', e.message); }
+			await this.loadSecurity();
+		},
+		async deleteToken(t) {
+			try { await this.call('token-delete', { name: t.id, body: '' }); } catch (e) { this.show('fail', e.message); }
+			await this.loadSecurity();
 		},
 
 		async refresh() {
 			try {
-				const [st, ck, ls] = await Promise.all([api('status'), api('check'), api('leases')]);
+				const [st, ck, ls] = await Promise.all([this.call('status'), this.call('check'), this.call('leases')]);
 				const kv = parseKV(st);
 				kv.addrs = lines(st).filter(l => l.startsWith('addr=')).map(l => l.slice(5).split(' '));
 				kv.ifaces = lines(st).filter(l => l.startsWith('iface=')).map(l => {
@@ -126,7 +264,7 @@ document.addEventListener('alpine:init', () => {
 
 		async loadConfig() {
 			try {
-				const [s, ifc, sv, fw, h] = await Promise.all(['settings', 'interfaces', 'services', 'forwards', 'hosts'].map(n => api('file', { name: n })));
+				const [s, ifc, sv, fw, h] = await Promise.all(['settings', 'interfaces', 'services', 'forwards', 'hosts'].map(n => this.call('file', { name: n })));
 				this.settings = parseKV(s);
 				this.ifaces = lines(ifc).map(parseIface);
 				this.services = lines(sv).map(parseRule).map(([[proto, port], comment]) => ({ proto, port, comment }));
@@ -153,19 +291,19 @@ document.addEventListener('alpine:init', () => {
 			this.busy = true;
 			const errors = [];
 			for (const [name, body] of Object.entries(this.files())) {
-				try { await api('save', { name, body }); } catch (e) { errors.push(`${name}: ${e.message}`); break; }
+				try { await this.call('save', { name, body }); } catch (e) { errors.push(`${name}: ${e.message}`); break; }
 			}
 			if (errors.length) {
 				this.show('fail', `Not saved, please fix:\n${errors.join('\n')}`);
 			} else {
 				try {
-					const out = await api('apply', { body: '' });
+					const out = await this.call('apply', { body: '' });
 					this.show('ok', `Applied.\n${out.trim()}`);
 				} catch (e) {
 					this.show('fail', `Saved, but applying failed:\n${e.message}`);
 				}
 			}
-			await this.refresh();
+			await Promise.all([this.refresh(), this.loadSecurity()]);
 			this.busy = false;
 		},
 
@@ -196,7 +334,7 @@ document.addEventListener('alpine:init', () => {
 			return this.ctid(c.hint);
 		},
 		ctid(text) { return text.replaceAll('CTID', this.ctidValue.trim() || 'CTID'); },
-		saveCtid() { try { localStorage.setItem('pxmxfw.ctid', this.ctidValue); } catch (e) { /* no storage */ } },
+		async saveCtid() { try { await this.call('pref', { name: 'ctid', body: this.ctidValue.trim() }); } catch (e) { /* not important */ } },
 		hostCommands() {
 			const m = this.missingModules.join(' ');
 			return this.ctid([

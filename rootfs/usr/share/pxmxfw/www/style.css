@@ -55,3 +55,11 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .addr { display: flex; gap: 6px; flex-wrap: wrap; }
 .addr input { width: auto; flex: 1 1 110px; }
 .badge + .badge, span + .badge { margin-left: 6px; }
+.login { max-width: 320px; margin: 12vh auto; display: flex; flex-direction: column; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; }
+.login h1 { margin: 0; font-size: 20px; }
+.login label, .dialog label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
+.login p { margin: 0; }
+.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
+.dialog { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px 20px 16px; width: 100%; max-width: 360px; }
+.actions button + button { margin-left: 8px; }
+code { font-size: 12px; word-break: break-all; }

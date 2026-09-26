@@ -33,8 +33,8 @@ Or as root on an x86_64 Linux host with internet access (a Proxmox node works):
 ```
 
 This downloads the Alpine minirootfs (checksum verified), installs
-`alpine-base`, `nftables`, `dnsmasq` and `busybox-extras` (for the web UI's
-httpd), adds [Alpine.js](https://alpinejs.dev) (pinned by checksum), applies
+`alpine-base`, `nftables`, `dnsmasq`, `linux-pam` and `sqlite-libs`, builds
+the web UI server from `webui/` with Alpine's Go, adds [Alpine.js](https://alpinejs.dev) (pinned by checksum), applies
 the files under `rootfs/`, enables the services and writes
 `out/alpine-<version>-pxmxfw-<date>_amd64.tar.gz`. Run `./build.sh -h` for
 options (Alpine version, mirror, output dir, local minirootfs).
@@ -80,7 +80,8 @@ the next start or when you open the web UI, and start with `role=off`.
 
 ## Web UI
 
-Open `http://<LAN address>:8080` and log in as `root`. It has:
+Open `https://<LAN address>:8443` and log in as `root` (or a member of the
+`pxmxfw` group) with that user's password. It has:
 
 - **Status**: firewall, dnsmasq, forwarding, interfaces and addresses.
 - **Interfaces**: role of each NIC, addresses for NICs Proxmox does not
@@ -92,14 +93,45 @@ Open `http://<LAN address>:8080` and log in as `root`. It has:
   conntrack, NAT, WireGuard), IP forwarding and the interfaces. A container
   cannot load kernel modules, so for anything missing it shows the
   `modprobe` and `/etc/modules-load.d` commands to run on the Proxmox host.
+- **Security**: two-factor login, access tokens and the log of recent
+  changes.
 
-The UI is served by busybox httpd and runs as root, since it changes the
-firewall. It copies the root password hash into its config when it starts,
-so after changing the password run `rc-service pxmxfw-webui restart`. It only listens on the LAN address, and it refuses changes from
-other web pages (every change needs an `X-Pxmxfw` header, which browsers do
-not send across sites without a CORS preflight, and the UI never answers
-one). The login is HTTP basic auth over plain HTTP, so use it from the LAN
-only.
+### Login and security
+
+The UI is served by `pxmxfw-webui`, a small Go server (source in `webui/`).
+
+- **HTTPS**: on first start it creates a self-signed certificate in
+  `/etc/pxmxfw/tls/webui.crt` and `webui.key`. Replace both files with a
+  certificate from your own CA or ACME to get rid of the browser warning,
+  then `rc-service pxmxfw-webui restart`.
+- **Passwords** are checked by PAM (`/etc/pam.d/pxmxfw`), so password
+  changes apply at once and other PAM modules can be added there.
+- **Two-factor login (TOTP)**: turn it on under Security with any
+  authenticator app. Logins then need the code as well.
+- **Changes are confirmed**: saving, applying, and managing tokens or 2FA
+  ask for a fresh TOTP code (or the password, without TOTP). A
+  confirmation lasts 5 minutes.
+- **Access tokens** for Ansible and scripts: create one under Security and
+  send it as `Authorization: Bearer pxm_...`. A `read` token can read status
+  and files; a `write` token can also `save` and `apply`, without the
+  confirmation step. Tokens cannot manage logins or other tokens.
+- Sessions end after 30 minutes idle or 12 hours. Five failed logins from
+  one address or for one user block further tries for 5 minutes.
+- The UI's own state (sessions, TOTP secrets, token hashes, preferences, the
+  change log) is in SQLite at `/var/lib/pxmxfw/webui.db`. The firewall
+  config stays in `/etc/pxmxfw`.
+- It only listens on the LAN address. Every change also needs an `X-Pxmxfw`
+  header (tokens aside), so other web pages cannot make a logged-in browser
+  change anything.
+
+Example with a token:
+
+```sh
+T=pxm_...
+curl -k -H "Authorization: Bearer $T" 'https://192.168.10.1:8443/api?action=file&name=services'
+curl -k -H "Authorization: Bearer $T" --data-binary @services 'https://192.168.10.1:8443/api?action=save&name=services'
+curl -k -H "Authorization: Bearer $T" -X POST 'https://192.168.10.1:8443/api?action=apply'
+```
 
 ## Configuration
 
@@ -138,4 +170,5 @@ allow it on WAN in `services` if you need it.
 ```sh
 sudo tests/run.sh                    # dash; as root the rules are also loaded
 sudo SH="busybox ash" tests/run.sh   # the shell Alpine uses
+cd webui && go test -tags libsqlite3 ./...   # web UI server (needs PAM and SQLite headers)
 ```
