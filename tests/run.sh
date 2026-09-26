@@ -345,5 +345,44 @@ grep -q '^  modprobe -a .*nft_masq' "$T/out" && grep -q '/etc/modules-load.d/pxm
 PATH="$T/fakebin:$PATH" PXMXFW_ETC=$T/etc "$PXMXFW" check --tsv | awk -F '\t' 'NF != 5 { exit 1 }' && ok ||
 	bad "check --tsv has 5 fields per line"
 
+# ---- extra packages ----------------------------------------------------------
+
+expect_valid packages "$(printf 'nano\nopenssh # remote access\nbind-tools\npy3-yaml\nlibstdc++')"
+expect_invalid packages "nano; reboot"
+expect_invalid packages "two names"
+expect_invalid packages "-flag"
+expect_invalid packages "Upper"
+
+# A fake apk that records what it was asked to do
+cat > "$T/fakebin/apk" <<EOF
+#!/bin/sh
+echo "\$*" >> "$T/apk.log"
+case \$1 in
+	info) printf '%s\n' nano-8.4-r0 openssh-server-10.0_p1-r7 libstdc++-14.2.0-r6 ;;
+	search) echo "nano-8.4-r0 - Enhanced clone of the Pico text editor" ;;
+	add|del) case "\$*" in *broken*) exit 1 ;; esac ;;
+esac
+EOF
+chmod +x "$T/fakebin/apk"
+fresh_etc "$T/etc"
+pkg() { PATH="$T/fakebin:$PATH" PXMXFW_ETC=$T/etc "$PXMXFW" "$@"; }
+: > "$T/apk.log"
+pkg pkg-add nano 'libstdc++' > /dev/null && grep -qx 'add -- nano libstdc++' "$T/apk.log" && ok || bad "pkg-add runs apk add"
+pkg pkg-add nano > /dev/null && [ "$(grep -cx nano "$T/etc/packages")" = 1 ] && ok || bad "pkg-add lists a package once"
+pkg pkg-list | grep -qx 'nano 8.4-r0' && pkg pkg-list | grep -qx 'libstdc++ 14.2.0-r6' && ok || bad "pkg-list shows versions: $(pkg pkg-list)"
+pkg pkg-add 'nano;reboot' > /dev/null 2>&1 && bad "pkg-add accepts a bad name" || ok
+pkg pkg-add broken > /dev/null 2>&1 && bad "pkg-add ignores apk failure" || ok
+grep -qx broken "$T/etc/packages" && bad "failed install is listed" || ok
+pkg pkg-del nftables > /dev/null 2>&1 && bad "pkg-del removes a base package" || ok
+grep -q 'del -- nftables' "$T/apk.log" && bad "apk del ran for a base package" || ok
+pkg pkg-del nano > /dev/null && ! grep -qx nano "$T/etc/packages" && grep -qx 'libstdc++' "$T/etc/packages" && ok ||
+	bad "pkg-del removes only that line: $(cat "$T/etc/packages")"
+grep -q '^# Extra Alpine packages' "$T/etc/packages" && ok || bad "pkg-del keeps comments"
+printf 'openssh\n' >> "$T/etc/packages"
+: > "$T/apk.log"
+pkg pkg-sync > /dev/null && grep -qx 'add -- libstdc++ openssh' "$T/apk.log" && ok || bad "pkg-sync installs the list: $(cat "$T/apk.log")"
+pkg pkg-search nano | grep -q '^nano-8.4-r0 - ' && ok || bad "pkg-search"
+pkg pkg-search '*' > /dev/null 2>&1 && bad "pkg-search accepts a pattern" || ok
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

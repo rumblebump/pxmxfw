@@ -28,6 +28,7 @@ const (
 	cookieName    = "__Host-pxmxfw"
 	maxBody       = 64 << 10
 	cmdTimeout    = 2 * time.Minute
+	pkgTimeout    = 10 * time.Minute // apk add/upgrade over a slow link
 )
 
 // failDelay slows down password and code guessing (tests set it to zero).
@@ -194,6 +195,19 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 		s.st.endSession(p.session)
 		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		text(w, http.StatusOK, "logged out\n")
+	case "GET:pkgs":
+		s.run(w, "pkg-list")
+	case "GET:pkg-search":
+		out, err := s.command("pkg-search", name)
+		if err != nil {
+			text(w, http.StatusBadRequest, string(out))
+			return
+		}
+		text(w, http.StatusOK, string(out))
+	case "POST:pkg-add", "POST:pkg-del", "POST:pkg-sync", "POST:pkg-upgrade":
+		if s.requireStepUp(w, r, p) {
+			s.packages(w, p, action, name)
+		}
 	case "POST:wgkeypair":
 		// a fresh WireGuard key pair for a peer config; nothing is stored
 		out, err := s.command("wg-keypair")
@@ -270,6 +284,7 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 var tokenActions = map[string]bool{
 	"GET:status": true, "GET:check": true, "GET:file": true, "GET:leases": true,
 	"GET:me": true, "POST:save": true, "POST:apply": true,
+	"GET:pkgs": true, "POST:pkg-sync": true,
 }
 
 // ---- login, step-up, TOTP ----
@@ -565,14 +580,18 @@ func (s *server) fileFor(name string) (string, bool) {
 	switch name {
 	case "settings":
 		return filepath.Join(s.etc, "pxmxfw.conf"), true
-	case "interfaces", "services", "forwards", "hosts", "wireguard":
+	case "interfaces", "services", "forwards", "hosts", "wireguard", "packages":
 		return filepath.Join(s.etc, name), true
 	}
 	return "", false
 }
 
 func (s *server) command(args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+	return s.commandT(cmdTimeout, args...)
+}
+
+func (s *server) commandT(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return exec.CommandContext(ctx, s.pxmxfw, args...).CombinedOutput()
 }
@@ -643,6 +662,30 @@ func (s *server) apply(w http.ResponseWriter, p *principal) {
 		return
 	}
 	s.st.log(s.now(), p.user, "apply", "ok"+via(p))
+	text(w, http.StatusOK, string(out))
+}
+
+// packages installs or removes Alpine packages through pxmxfw pkg-*.
+func (s *server) packages(w http.ResponseWriter, p *principal, action, name string) {
+	args := []string{action}
+	if action == "pkg-add" || action == "pkg-del" {
+		names := strings.Fields(name)
+		if len(names) == 0 || len(names) > 20 {
+			text(w, http.StatusBadRequest, "name 1-20 packages\n")
+			return
+		}
+		args = append(args, names...)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out, err := s.commandT(pkgTimeout, args...)
+	detail := strings.TrimSpace(strings.TrimPrefix(action, "pkg-") + " " + name)
+	if err != nil {
+		s.st.log(s.now(), p.user, "packages", detail+" failed"+via(p))
+		text(w, http.StatusInternalServerError, string(out))
+		return
+	}
+	s.st.log(s.now(), p.user, "packages", detail+via(p))
 	text(w, http.StatusOK, string(out))
 }
 

@@ -357,8 +357,36 @@ wg_each() {
 }
 
 # validate KIND FILE: KIND is settings, interfaces, services, forwards, hosts or wireguard
+# ---- extra packages -----------------------------------------------------------
+# packages: one Alpine package name per line, with an optional "# comment".
+# These are installed on top of the template (see pxmxfw pkg-*).
+
+is_pkgname() {
+	[ ${#1} -le 64 ] || return 1
+	case $1 in ''|[!a-z0-9]*|*[!a-z0-9+._-]*) return 1 ;; esac
+}
+
+pkgs_each() { # FILE CALLBACK|-
+	_f=$1 _cb=$2
+	_errors=0
+	[ -r "$_f" ] || return 0
+	_n=0
+	while IFS= read -r _line || [ -n "$_line" ]; do
+		_n=$((_n + 1))
+		_line=$(_strip "$_line")
+		[ -n "$_line" ] || continue
+		# shellcheck disable=SC2086
+		set -- $_line
+		{ [ $# -eq 1 ] && is_pkgname "$1"; } ||
+			{ err "$_f" "$_n" "expected one package name (a-z 0-9 + . _ -)"; continue; }
+		[ "$_cb" = - ] || "$_cb" "$1"
+	done < "$_f"
+	[ "$_errors" -eq 0 ]
+}
+
 validate() {
 	case $1 in
+		packages) pkgs_each "$2" - ;;
 		settings) settings_load "$2" ;;
 		interfaces) ifaces_each "$2" - ;;
 		wireguard) wg_each "$2" - ;;

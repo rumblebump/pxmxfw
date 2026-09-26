@@ -8,9 +8,15 @@
 #   status             show interfaces and service state
 #   detect             add newly found network interfaces (as role=off)
 #   render nft|dnsmasq print the generated config without applying it
-#   validate KIND FILE check a config file (settings|interfaces|services|forwards|hosts)
+#   validate KIND FILE check a config file (settings|interfaces|services|forwards|hosts|wireguard|packages)
 #   firstboot          one-time setup on the first container start
 #   wg-keypair         print a new WireGuard key pair (for a peer; not stored)
+#   pkg-list           extra packages from /etc/pxmxfw/packages and their versions
+#   pkg-search TERM    search Alpine packages
+#   pkg-add NAME...    install packages and add them to the list
+#   pkg-del NAME...    remove listed packages
+#   pkg-sync           install everything on the list (after editing the file)
+#   pkg-upgrade        update the package index and upgrade all packages
 #
 # Settings live in /etc/pxmxfw. The web UI edits the same files, so they can
 # also be managed with Ansible, Puppet or git: write them, then "pxmxfw apply".
@@ -476,6 +482,70 @@ cmd_webui_listen() {
 	echo "127.0.0.1:$WEBUI_PORT"
 }
 
+# ---- extra packages -------------------------------------------------------------
+# /etc/pxmxfw/packages is the list of packages added on top of the template,
+# so a rebuilt container (or Ansible) can put the same ones back.
+
+APK=${PXMXFW_APK:-apk}
+PKGS=$PXMXFW_ETC/packages
+
+pkgs_listed() { pkgs_each "$PKGS" echo 2>/dev/null || true; }
+
+# NAME VERSION (or "-" when not installed) for every listed package
+cmd_pkg_list() {
+	_inst=$("$APK" info -v 2>/dev/null) || true
+	for p in $(pkgs_listed); do
+		v=$(printf '%s\n' "$_inst" | awk -v n="$p" '
+			match($0, /-[0-9][^-]*-r[0-9]+$/) && substr($0, 1, RSTART - 1) == n { print substr($0, RSTART + 1); exit }')
+		echo "$p ${v:--}"
+	done
+}
+
+cmd_pkg_search() {
+	is_pkgname "${1:-}" || die "search for a package name (a-z 0-9 + . _ -)"
+	"$APK" search -v -- "$1" | head -n 100
+}
+
+pkg_names() { # validate NAME... from the command line
+	[ $# -gt 0 ] || die "name at least one package"
+	for p in "$@"; do is_pkgname "$p" || die "not a package name: $p"; done
+}
+
+cmd_pkg_add() {
+	pkg_names "$@"
+	"$APK" add -- "$@" || die "apk add failed"
+	touch "$PKGS"
+	for p in "$@"; do
+		pkgs_listed | grep -qxF -- "$p" || echo "$p" >> "$PKGS"
+	done
+	echo "installed: $*"
+}
+
+cmd_pkg_del() {
+	pkg_names "$@"
+	for p in "$@"; do
+		pkgs_listed | grep -qxF -- "$p" || die "$p was not added with pxmxfw, so it is not removed here"
+	done
+	"$APK" del -- "$@" || die "apk del failed"
+	tmp=$PKGS.new.$$
+	awk -v del=" $* " '{ w = $0; sub(/#.*/, "", w); gsub(/[ \t]/, "", w) } !(w != "" && index(del, " " w " ")) { print }' "$PKGS" > "$tmp" &&
+		mv "$tmp" "$PKGS"
+	echo "removed: $*"
+}
+
+cmd_pkg_sync() {
+	validate packages "$PKGS" || die "fix $PKGS first"
+	# shellcheck disable=SC2046
+	set -- $(pkgs_listed)
+	[ $# -gt 0 ] || { echo "no extra packages listed"; return 0; }
+	"$APK" add -- "$@" || die "apk add failed"
+	echo "installed: $*"
+}
+
+cmd_pkg_upgrade() {
+	"$APK" upgrade --update-cache || die "apk upgrade failed"
+}
+
 case ${1:-help} in
 	apply) cmd_apply ;;
 	boot) cmd_boot ;;
@@ -487,6 +557,12 @@ case ${1:-help} in
 	firstboot) cmd_firstboot ;;
 	webui-listen) cmd_webui_listen ;;
 	wg-keypair) cmd_wg_keypair ;;
-	help|-h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+	pkg-list) cmd_pkg_list ;;
+	pkg-search) cmd_pkg_search "${2:-}" ;;
+	pkg-add) shift; cmd_pkg_add "$@" ;;
+	pkg-del) shift; cmd_pkg_del "$@" ;;
+	pkg-sync) cmd_pkg_sync ;;
+	pkg-upgrade) cmd_pkg_upgrade ;;
+	help|-h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' ;;
 	*) die "unknown command: $1 (try: pxmxfw help)" ;;
 esac

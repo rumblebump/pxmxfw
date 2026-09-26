@@ -305,6 +305,40 @@
 		<div class="actions"><button :disabled="busy" @click="refresh()">Run checks again</button></div>
 	</section>
 
+	<!-- Packages -->
+	<section x-show="tab === 'packages'">
+		<h2>Added packages</h2>
+		<p class="muted">Alpine packages installed on top of the template. The list is kept in <code>/etc/pxmxfw/packages</code>, so it can be restored with <code>pxmxfw pkg-sync</code> or managed with Ansible.</p>
+		<table x-show="pkgs.length">
+			<tr><th>Package</th><th>Version</th><th></th></tr>
+			<template x-for="p in pkgs" :key="p.name">
+				<tr><td x-text="p.name"></td><td x-text="p.version"></td>
+					<td><button class="link" :disabled="busy" @click="pkgAction('pkg-del', p.name)">Remove</button></td></tr>
+			</template>
+		</table>
+		<p class="muted" x-show="!pkgs.length">None yet.</p>
+		<div class="addr">
+			<button :disabled="busy" @click="pkgAction('pkg-sync')">Install missing</button>
+			<button :disabled="busy" @click="pkgAction('pkg-upgrade')">Upgrade all packages</button>
+		</div>
+
+		<h2>Find packages</h2>
+		<form class="addr" @submit.prevent="searchPkgs()">
+			<input x-model="pkgQuery" placeholder="e.g. tcpdump, htop, openssh" required>
+			<button>Search</button>
+		</form>
+		<table x-show="pkgResults && pkgResults.length">
+			<tr><th>Package</th><th>Version</th><th>Description</th><th></th></tr>
+			<template x-for="r in pkgResults || []" :key="r.name">
+				<tr><td x-text="r.name"></td><td x-text="r.version"></td><td x-text="r.desc"></td>
+					<td><span class="muted" x-show="listed(r.name)">added</span>
+						<button class="link" x-show="!listed(r.name)" :disabled="busy" @click="pkgAction('pkg-add', r.name)">Install</button></td></tr>
+			</template>
+		</table>
+		<p class="muted" x-show="pkgResults && !pkgResults.length">Nothing found.</p>
+		<pre class="code" x-show="pkgOutput" x-text="pkgOutput"></pre>
+	</section>
+
 	<!-- Security -->
 	<section x-show="tab === 'security'">
 		<h2>Two-factor login (TOTP)</h2>

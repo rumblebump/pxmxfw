@@ -93,6 +93,8 @@ Open `https://<LAN address>:8443` and log in as `root` (or a member of the
   conntrack, NAT, WireGuard), IP forwarding and the interfaces. A container
   cannot load kernel modules, so for anything missing it shows the
   `modprobe` and `/etc/modules-load.d` commands to run on the Proxmox host.
+- **Packages**: search, install and remove Alpine packages, and upgrade
+  everything. Each change needs a confirmation.
 - **Security**: two-factor login, access tokens and the log of recent
   changes.
 
@@ -163,6 +165,14 @@ Routes for each peer's allowed IPs point into the tunnel; a `/0` is never
 routed, so a peer cannot take over the default route. The tunnel's UDP port
 is opened automatically. The container needs the `wireguard` module on the
 Proxmox host: the Checks page shows the command.
+
+### Extra packages
+
+Packages added in the UI or with `pxmxfw pkg-add NAME` are listed in
+`/etc/pxmxfw/packages`, one per line. After editing that file (by hand,
+Ansible or git), `pxmxfw pkg-sync` installs whatever is missing, so a new
+container can be brought to the same state. `pxmxfw pkg-del` only removes
+packages from that list, never the ones the template needs.
 
 ## Configuration
 
