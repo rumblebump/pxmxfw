@@ -74,7 +74,7 @@ func main() {
 		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      cmdTimeout + 30*time.Second,
+		WriteTimeout:      pkgTimeout + 30*time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
 	log.Printf("pxmxfw web UI on https://%s", addr)

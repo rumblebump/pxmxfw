@@ -183,12 +183,17 @@ document.addEventListener('alpine:init', () => {
 			{ id: 'wireguard', label: 'WireGuard' },
 			{ id: 'dns', label: 'DNS & DHCP' },
 			{ id: 'checks', label: 'Checks' },
+			{ id: 'packages', label: 'Packages' },
 			{ id: 'security', label: 'Security' },
 		],
 		authed: null,
 		login: { user: 'root', password: '', code: '', need: [], flow: null, error: '' },
 		confirmBox: { open: false, methods: [], value: '', error: '' },
 		keys: [],
+		pkgs: [],
+		pkgQuery: '',
+		pkgResults: null,
+		pkgOutput: '',
 		newKeyName: '',
 		me: {},
 		totpSetup: null,
@@ -225,7 +230,7 @@ document.addEventListener('alpine:init', () => {
 			this.login.password = this.login.code = this.login.error = '';
 			this.login.need = [];
 			this.login.flow = null;
-			await Promise.all([this.refresh(), this.loadConfig(), this.loadSecurity()]);
+			await Promise.all([this.refresh(), this.loadConfig(), this.loadSecurity(), this.loadPkgs()]);
 			try { this.ctidValue = parseKV(await this.call('prefs')).ctid || ''; } catch (e) { /* not important */ }
 		},
 
@@ -352,6 +357,35 @@ document.addEventListener('alpine:init', () => {
 				this.show('ok', 'Two-factor login is off.');
 			} catch (e) { this.show('fail', e.message); }
 			await this.loadSecurity();
+		},
+		async loadPkgs() {
+			try {
+				this.pkgs = lines(await this.call('pkgs')).map(l => {
+					const [name, version] = l.split(' ');
+					return { name, version: version === '-' ? 'not installed' : version };
+				});
+			} catch (e) { this.show('fail', `Could not list packages: ${e.message}`); }
+		},
+		async searchPkgs() {
+			try {
+				this.pkgResults = lines(await this.call('pkg-search', { name: this.pkgQuery.trim() })).map(l => {
+					const m = l.match(/^(.+?)-([0-9][^-]*-r[0-9]+) - (.*)$/);
+					return m ? { name: m[1], version: m[2], desc: m[3] } : { name: l, version: '', desc: '' };
+				});
+			} catch (e) { this.show('fail', e.message); }
+		},
+		listed(name) { return this.pkgs.some(p => p.name === name); },
+		// install, remove, sync or upgrade; apk's output is shown below
+		async pkgAction(action, name = '') {
+			this.busy = true;
+			this.pkgOutput = `Running ${action.replace('pkg-', '')} ${name}...`;
+			try {
+				this.pkgOutput = await this.call(action, { name, body: '' });
+			} catch (e) {
+				this.pkgOutput = e.message;
+			}
+			await this.loadPkgs();
+			this.busy = false;
 		},
 		async addKey() {
 			try {

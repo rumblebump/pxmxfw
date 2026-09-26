@@ -1,0 +1,2 @@
+# Extra Alpine packages, one per line. Change with the web UI or
+# pxmxfw pkg-add/pkg-del, or edit and run: pxmxfw pkg-sync

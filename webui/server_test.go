@@ -36,6 +36,10 @@ case $1 in
 	status) echo firewall=active ;;
 	detect) ;;
 	wg-keypair) echo private=PRIV; echo public=PUB ;;
+	pkg-list) echo "nano 8.4-r0" ;;
+	pkg-search) [ "$2" = nano ] || { echo "bad name"; exit 1; }; echo "nano-8.4-r0 - editor" ;;
+	pkg-add|pkg-del) shift; echo "done: $*" ;;
+	pkg-sync|pkg-upgrade) echo ok ;;
 	*) exit 1 ;;
 esac
 `
@@ -236,6 +240,27 @@ func TestAccessTokens(t *testing.T) {
 	e.expect(e.do(req{method: "GET", query: "action=status", bearer: ro}), 401, "deleted token")
 	e.now = e.now.AddDate(0, 0, 31)
 	e.expect(e.do(req{method: "GET", query: "action=status", bearer: rw}), 401, "expired token")
+}
+
+func TestPackages(t *testing.T) {
+	e := newEnv(t)
+	c := e.login("root", "pw", "")
+	if w := e.do(req{method: "GET", query: "action=pkgs", cookie: c}); w.Body.String() != "nano 8.4-r0\n" {
+		t.Fatalf("pkgs: %q", w.Body.String())
+	}
+	e.expect(e.do(req{method: "GET", query: "action=pkg-search&name=nano", cookie: c}), 200, "search")
+	e.expect(e.do(req{method: "GET", query: "action=pkg-search&name=x", cookie: c}), 400, "bad search")
+	e.expect(e.do(req{method: "POST", query: "action=pkg-add&name=nano", cookie: c}), 403, "install without confirming")
+	e.do(req{method: "POST", query: "action=stepup", body: `{"password":"pw"}`, cookie: c})
+	w := e.do(req{method: "POST", query: "action=pkg-add&name=nano%20htop", cookie: c})
+	if w.Code != 200 || w.Body.String() != "done: nano htop\n" {
+		t.Fatalf("pkg-add: %d %q", w.Code, w.Body.String())
+	}
+	e.expect(e.do(req{method: "POST", query: "action=pkg-del&name=", cookie: c}), 400, "remove nothing")
+	e.expect(e.do(req{method: "POST", query: "action=pkg-upgrade", cookie: c}), 200, "upgrade")
+	if w := e.do(req{method: "GET", query: "action=audit", cookie: c}); !strings.Contains(w.Body.String(), "\tpackages\tadd nano htop") {
+		t.Fatalf("audit: %q", w.Body.String())
+	}
 }
 
 func TestPrefsAndHeaders(t *testing.T) {
