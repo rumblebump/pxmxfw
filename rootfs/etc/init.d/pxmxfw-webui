@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+# pxmxfw web UI, served by busybox httpd. It listens on the LAN address
+# only (see WEBUI_PORT and WEBUI_WAN in /etc/pxmxfw/pxmxfw.conf).
+
+description="pxmxfw web UI"
+supervisor=supervise-daemon
+command=/bin/busybox-extras
+
+depend() {
+	need net
+	after nftables pxmxfw
+}
+
+start_pre() {
+	listen=$(/usr/sbin/pxmxfw webui-listen) || return 1
+	mkdir -p /run/pxmxfw
+	echo "$listen" > /run/pxmxfw/webui.listen
+	command_args="httpd -f -p $listen -h /usr/share/pxmxfw/www -c /etc/pxmxfw/httpd.conf"
+	einfo "Web UI on $listen"
+}

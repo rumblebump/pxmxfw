@@ -1,0 +1,86 @@
+#!/bin/sh
+# pxmxfw web UI backend (CGI for busybox httpd, which does the login).
+#
+#   GET  ?action=status              key=value lines
+#   GET  ?action=check               tab separated checks, see "pxmxfw check --tsv"
+#   GET  ?action=file&name=NAME      raw config file (settings|interfaces|services|forwards|hosts);
+#                                    for interfaces, newly added NICs are detected first
+#   GET  ?action=leases              dnsmasq leases
+#   POST ?action=save&name=NAME      body replaces the file after validation
+#   POST ?action=apply               runs "pxmxfw apply"
+#
+# POST requests must carry an "X-Pxmxfw: 1" header. Browsers do not send
+# custom headers cross-site without a CORS preflight, which this never
+# answers, so other web pages cannot make a logged-in browser change things.
+
+set -f
+PXMXFW=${PXMXFW:-/usr/sbin/pxmxfw}
+PXMXFW_ETC=${PXMXFW_ETC:-/etc/pxmxfw}
+LEASES=${PXMXFW_LEASES:-/var/lib/misc/dnsmasq.leases}
+MAX_BODY=65536
+
+respond() { # STATUS then body on stdin
+	printf 'Status: %s\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n' "$1"
+	cat
+}
+fail() { printf '%s\n' "$2" | respond "$1"; exit 0; }
+
+# Parse the query string: only known names with plain values are accepted.
+action='' name=''
+old_ifs=$IFS; IFS='&'
+for kv in ${QUERY_STRING:-}; do
+	case $kv in
+		action=*) action=${kv#action=} ;;
+		name=*) name=${kv#name=} ;;
+	esac
+done
+IFS=$old_ifs
+
+file_for() {
+	case $1 in
+		settings) echo "$PXMXFW_ETC/pxmxfw.conf" ;;
+		interfaces|services|forwards|hosts) echo "$PXMXFW_ETC/$1" ;;
+		*) return 1 ;;
+	esac
+}
+
+case ${REQUEST_METHOD:-GET} in
+	GET) ;;
+	POST)
+		[ "${HTTP_X_PXMXFW:-}" = 1 ] || fail "403 Forbidden" "missing X-Pxmxfw header"
+		len=${CONTENT_LENGTH:-0}
+		case $len in ''|*[!0-9]*) fail "400 Bad Request" "bad Content-Length" ;; esac
+		[ "$len" -le $MAX_BODY ] || fail "413 Payload Too Large" "request too large"
+		;;
+	*) fail "405 Method Not Allowed" "use GET or POST" ;;
+esac
+
+case ${REQUEST_METHOD:-GET}:$action in
+	GET:status) "$PXMXFW" status 2>&1 | respond "200 OK" ;;
+	GET:check) "$PXMXFW" check --tsv 2>&1 | respond "200 OK" ;;
+	GET:file)
+		f=$(file_for "$name") || fail "400 Bad Request" "unknown file"
+		[ "$name" != interfaces ] || "$PXMXFW" detect >/dev/null 2>&1
+		cat "$f" 2>/dev/null | respond "200 OK" ;;
+	GET:leases) cat "$LEASES" 2>/dev/null | respond "200 OK" ;;
+	POST:save)
+		f=$(file_for "$name") || fail "400 Bad Request" "unknown file"
+		tmp=$f.new.$$
+		head -c "$len" > "$tmp"
+		if out=$("$PXMXFW" validate "$name" "$tmp" 2>&1); then
+			mv "$tmp" "$f"
+			echo saved | respond "200 OK"
+		else
+			rm -f "$tmp"
+			# report line numbers, not the temporary path
+			printf '%s\n' "$out" | sed "s|^$tmp:\([0-9]*\):|line \\1:|; s|^$tmp: ||" | respond "422 Unprocessable Entity"
+		fi ;;
+	POST:apply)
+		head -c "$len" > /dev/null
+		if out=$("$PXMXFW" apply 2>&1); then
+			printf '%s\n' "$out" | respond "200 OK"
+		else
+			printf '%s\n' "$out" | respond "500 Internal Server Error"
+		fi ;;
+	*) fail "404 Not Found" "unknown action" ;;
+esac

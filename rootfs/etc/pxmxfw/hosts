@@ -1,0 +1,4 @@
+# Local DNS names, and fixed DHCP leases when a MAC is given (needs dnsmasq).
+# Format: IP NAME [MAC] [# comment]
+# Example:
+# 192.168.10.10 nas 52:54:00:12:34:56

@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+# Runs before the firewall loads on every start: first boot setup (once),
+# picks up newly added network interfaces, sets the addresses pxmxfw manages
+# and writes the ruleset the nftables service loads next. Proxmox has already
+# written its network config by the time this runs.
+
+description="pxmxfw setup"
+
+depend() {
+	need localmount
+	after sysctl
+	before nftables net
+}
+
+start() {
+	ebegin "Preparing pxmxfw"
+	/usr/sbin/pxmxfw boot
+	eend $?
+}

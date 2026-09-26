@@ -1,0 +1,6 @@
+pxmxfw: Alpine firewall for Proxmox LXC
+
+  Web UI:   http://<LAN address>:8080  (user root, your root password)
+  Status:   pxmxfw status   |  Checks: pxmxfw check
+  Settings: /etc/pxmxfw     |  Apply:  pxmxfw apply
+

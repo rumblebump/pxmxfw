@@ -1,0 +1,6 @@
+# Network interfaces. eth0 (net0 in Proxmox) is the WAN.
+# IFACE role=wan|lan|isolated|off [addr=proxmox|none|IP/PREFIX] [addr6=...] [dhcp=START-END]
+# On the first start pxmxfw rewrites this from the NICs Proxmox created;
+# NICs added later show up with role=off.
+eth0 role=wan
+eth1 role=lan
