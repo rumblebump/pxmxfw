@@ -372,6 +372,20 @@
 	</section>
 
 	<!-- Packages -->
+	<section x-show="tab === 'terminal'" x-effect="tab === 'terminal' && showTerminal()">
+		<h2>Terminal</h2>
+		<p class="muted">
+			A shell in this container as the user you logged in with. Opening it asks for a confirmation.
+			It closes when you log out or after 15 minutes without typing.
+		</p>
+		<div class="actions">
+			<button class="primary" x-show="!termOpen" @click="openTerminal()">Open terminal</button>
+			<button x-show="termOpen" @click="closeTerminal()">Close</button>
+		</div>
+		<p class="fail" x-show="termNote" x-text="termNote"></p>
+		<div id="term" class="term"></div>
+	</section>
+
 	<section x-show="tab === 'packages'">
 		<h2>Added packages</h2>
 		<p class="muted">Alpine packages installed on top of the template. The list is kept in <code>/etc/pxmxfw/packages</code>, so it can be restored with <code>pxmxfw pkg-sync</code> or managed with Ansible.</p>
