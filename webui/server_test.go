@@ -35,6 +35,7 @@ case $1 in
 	apply) echo applied ;;
 	status) echo firewall=active ;;
 	detect) ;;
+	wg-keypair) echo private=PRIV; echo public=PUB ;;
 	*) exit 1 ;;
 esac
 `
@@ -241,6 +242,10 @@ func TestPrefsAndHeaders(t *testing.T) {
 	e := newEnv(t)
 	c := e.login("root", "pw", "")
 	e.expect(e.do(req{method: "POST", query: "action=pref&name=ctid", body: "105", cookie: c}), 200, "set pref")
+	if w := e.do(req{method: "POST", query: "action=wgkeypair", cookie: c}); w.Code != 200 || !strings.Contains(w.Body.String(), "public=PUB") {
+		t.Fatalf("wgkeypair: %d %q", w.Code, w.Body.String())
+	}
+	e.expect(e.do(req{method: "GET", query: "action=file&name=wireguard", cookie: c}), 200, "wireguard file")
 	e.expect(e.do(req{method: "POST", query: "action=pref&name=BAD%20KEY", body: "1", cookie: c}), 400, "bad pref key")
 	w := e.do(req{method: "GET", query: "action=prefs", cookie: c})
 	if parseKV(w.Body.String())["ctid"] != "105" {

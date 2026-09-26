@@ -192,6 +192,14 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 		s.st.endSession(p.session)
 		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		text(w, http.StatusOK, "logged out\n")
+	case "POST:wgkeypair":
+		// a fresh WireGuard key pair for a peer config; nothing is stored
+		out, err := s.command("wg-keypair")
+		if err != nil {
+			text(w, http.StatusInternalServerError, string(out))
+			return
+		}
+		text(w, http.StatusOK, string(out))
 	case "POST:pref":
 		s.setPref(w, name, string(body))
 	case "POST:stepup":
@@ -491,7 +499,7 @@ func (s *server) fileFor(name string) (string, bool) {
 	switch name {
 	case "settings":
 		return filepath.Join(s.etc, "pxmxfw.conf"), true
-	case "interfaces", "services", "forwards", "hosts":
+	case "interfaces", "services", "forwards", "hosts", "wireguard":
 		return filepath.Join(s.etc, name), true
 	}
 	return "", false
