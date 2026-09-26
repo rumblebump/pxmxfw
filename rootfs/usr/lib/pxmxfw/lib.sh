@@ -155,22 +155,36 @@ settings_write() { # write current settings to stdout
 
 # ---- interfaces -------------------------------------------------------------
 # One line per network interface:
-#   IFACE role=ROLE [addr=A] [addr6=A] [dhcp=START-END] [# comment]
+#   IFACE role=ROLE [addr=A] [addr6=A] [dhcp=START-END] [allow=LIST]
+#         [type=vlan link=IFACE vid=N | type=bridge [ports=IFACE,IFACE]] [# comment]
 # role:  wan       the uplink, exactly one, addresses always set by Proxmox
 #        lan       trusted: reaches WAN and every other lan interface
 #        isolated  reaches WAN only (e.g. guests, DMZ)
-#        off       all traffic from it is dropped (new interfaces start here)
+#        off       all traffic from it is dropped (new NICs start here)
 # addr:  proxmox (default: Proxmox sets it), none, or IPv4/prefix set by pxmxfw
 # addr6: same for IPv6, used only when IPV6=yes
-# dhcp:  IPv4 range dnsmasq hands out on this interface
+# dhcp:  IPv4 range dnsmasq hands out on this interface (implies allow dhcp,dns)
+# allow: what lan and isolated interfaces may reach on the firewall itself:
+#        none or a comma list of ping,ssh,dns,dhcp,webui. Without allow= all
+#        of them (how interfaces from the first boot start); interfaces added
+#        in the web UI get allow=ping. The WAN uses WAN_PING and services.
+# type:  vlan    created by pxmxfw on top of link, with 802.1Q id vid
+#        bridge  created by pxmxfw, joining ports (listed with role=off)
+#        without type, a NIC from Proxmox or a WireGuard tunnel
+
+ALLOW_ALL=ping,ssh,dns,dhcp,webui
 
 # ifaces_each FILE CALLBACK: validate the interfaces file and call CALLBACK
-# with: name role addr addr6 dhcp comment. With CALLBACK "-" only validates.
-# Also sets WAN_IF, LAN_IFS (role lan), ISO_IFS (role isolated), IN_IFS (both).
+# with: name role addr addr6 dhcp comment type link vid ports allow. With
+# CALLBACK "-" only validates. Also sets WAN_IF, LAN_IFS (role lan), ISO_IFS
+# (role isolated), IN_IFS (both), ALLOW_<SERVICE>_IFS (inside interfaces that
+# may reach SERVICE), VLANS ("name:link:vid ..."), BRIDGES ("name:p1,p2 ..."),
+# IF_ROLES ("name:role ...").
 ifaces_each() {
 	_f=$1 _cb=$2
 	_errors=0
-	WAN_IF='' LAN_IFS='' ISO_IFS='' IN_IFS=''
+	WAN_IF='' LAN_IFS='' ISO_IFS='' IN_IFS='' VLANS='' BRIDGES='' IF_ROLES=''
+	ALLOW_PING_IFS='' ALLOW_SSH_IFS='' ALLOW_DNS_IFS='' ALLOW_DHCP_IFS='' ALLOW_WEBUI_IFS=''
 	_seen=' '
 	[ -r "$_f" ] || { err "$_f" 0 "missing"; return 1; }
 	_n=0
@@ -187,9 +201,23 @@ ifaces_each() {
 		is_iface "$_name" || { err "$_f" "$_n" "invalid interface name"; continue; }
 		case $_seen in *" $_name "*) err "$_f" "$_n" "$_name listed twice"; continue ;; esac
 		_seen="$_seen$_name "
-		_role='' _addr=proxmox _addr6=proxmox _dhcp='' _bad=''
+		_role='' _addr=proxmox _addr6=proxmox _dhcp='' _bad='' _type='' _link='' _vid='' _ports='' _allow=-
 		for _kv; do
 			case $_kv in
+				type=vlan|type=bridge) _type=${_kv#type=} ;;
+				link=*) is_iface "${_kv#link=}" && _link=${_kv#link=} || _bad="link: an interface name" ;;
+				vid=*) _vid=${_kv#vid=}; { is_uint "$_vid" && [ "$_vid" -ge 1 ] && [ "$_vid" -le 4094 ]; } || _bad="vid: 1 to 4094" ;;
+				ports=*)
+					_ports=${_kv#ports=}
+					for _p in $(echo "$_ports" | tr ',' ' '); do is_iface "$_p" || _bad="ports: interface names separated by commas"; done
+					case $_ports in ,*|*,|*,,*) _bad="ports: interface names separated by commas" ;; esac ;;
+				allow=none) _allow='' ;;
+				allow=*)
+					_allow=${_kv#allow=}
+					for _a in $(echo "$_allow" | tr ',' ' '); do
+						case ,$ALLOW_ALL, in *,"$_a",*) ;; *) _bad="allow: none or a list of ping,ssh,dns,dhcp,webui" ;; esac
+					done
+					case $_allow in ,*|*,|*,,*) _bad="allow: none or a list of ping,ssh,dns,dhcp,webui" ;; esac ;;
 				role=wan|role=lan|role=isolated|role=off) _role=${_kv#role=} ;;
 				addr=proxmox|addr=none) _addr=${_kv#addr=} ;;
 				addr=*) is_ipv4_cidr "${_kv#addr=}" && _addr=${_kv#addr=} || _bad="addr: use proxmox, none or IPv4/prefix" ;;
@@ -206,18 +234,74 @@ ifaces_each() {
 			[ "$_addr" = proxmox ] && [ "$_addr6" = proxmox ] || _bad="the WAN address is set in Proxmox (addr=proxmox)"
 			[ -z "$_dhcp" ] || _bad="no DHCP server on WAN"
 			[ -z "$WAN_IF" ] || _bad="only one interface can be wan"
+			[ "$_allow" = - ] || _bad="allow= is not for the WAN (use WAN_PING and services)"
+			[ -z "$_type" ] || _bad="the WAN is a NIC from Proxmox"
+		fi
+		if [ -z "$_bad" ]; then
+			case $_type in
+				vlan) [ -n "$_link" ] && [ -n "$_vid" ] || _bad="type=vlan needs link= and vid=" ;;
+				*) [ -z "$_link$_vid" ] || _bad="link= and vid= are only for type=vlan" ;;
+			esac
+			[ -z "$_ports" ] || [ "$_type" = bridge ] || _bad="ports= is only for type=bridge"
+			[ "$_link" != "$_name" ] || _bad="a VLAN cannot be on itself"
+			case ,$_ports, in *,"$_name",*) _bad="a bridge cannot be its own port" ;; esac
 		fi
 		[ -z "$_bad" ] || { err "$_f" "$_n" "$_name: $_bad"; continue; }
+		[ "$_allow" != - ] || _allow=$ALLOW_ALL
+		[ -z "$_dhcp" ] || _allow="$_allow,dhcp,dns"
+		IF_ROLES="$IF_ROLES $_name:$_role"
 		case $_role in
 			wan) WAN_IF=$_name ;;
 			lan) LAN_IFS="$LAN_IFS $_name"; IN_IFS="$IN_IFS $_name" ;;
 			isolated) ISO_IFS="$ISO_IFS $_name"; IN_IFS="$IN_IFS $_name" ;;
 		esac
-		[ "$_cb" = - ] || "$_cb" "$_name" "$_role" "$_addr" "$_addr6" "$_dhcp" "$_c"
+		case $_role in lan|isolated)
+			case ,$_allow, in *,ping,*) ALLOW_PING_IFS="$ALLOW_PING_IFS $_name" ;; esac
+			case ,$_allow, in *,ssh,*) ALLOW_SSH_IFS="$ALLOW_SSH_IFS $_name" ;; esac
+			case ,$_allow, in *,dns,*) ALLOW_DNS_IFS="$ALLOW_DNS_IFS $_name" ;; esac
+			case ,$_allow, in *,dhcp,*) ALLOW_DHCP_IFS="$ALLOW_DHCP_IFS $_name" ;; esac
+			case ,$_allow, in *,webui,*) ALLOW_WEBUI_IFS="$ALLOW_WEBUI_IFS $_name" ;; esac
+		esac
+		case $_type in
+			vlan) VLANS="$VLANS $_name:$_link:$_vid" ;;
+			bridge) BRIDGES="$BRIDGES $_name:$_ports" ;;
+		esac
+		[ "$_cb" = - ] || "$_cb" "$_name" "$_role" "$_addr" "$_addr6" "$_dhcp" "$_c" "$_type" "$_link" "$_vid" "$_ports" "$_allow"
 	done < "$_f"
-	LAN_IFS=${LAN_IFS# } ISO_IFS=${ISO_IFS# } IN_IFS=${IN_IFS# }
+	LAN_IFS=${LAN_IFS# } ISO_IFS=${ISO_IFS# } IN_IFS=${IN_IFS# } VLANS=${VLANS# } BRIDGES=${BRIDGES# } IF_ROLES=${IF_ROLES# }
+	ALLOW_PING_IFS=${ALLOW_PING_IFS# } ALLOW_SSH_IFS=${ALLOW_SSH_IFS# } ALLOW_DNS_IFS=${ALLOW_DNS_IFS# }
+	ALLOW_DHCP_IFS=${ALLOW_DHCP_IFS# } ALLOW_WEBUI_IFS=${ALLOW_WEBUI_IFS# }
+	[ "$_errors" -gt 0 ] || ifaces_links "$_f"
 	[ -n "$WAN_IF" ] || [ "$_errors" -gt 0 ] || err "$_f" 0 "one interface needs role=wan"
 	[ "$_errors" -eq 0 ]
+}
+
+# role_of NAME: the role of a listed interface, or nothing
+role_of() {
+	for _r in $IF_ROLES; do [ "${_r%%:*}" = "$1" ] && { echo "${_r#*:}"; return 0; }; done
+	return 1
+}
+
+# ifaces_links FILE: VLAN links and bridge ports must be listed interfaces;
+# a bridge port carries no role of its own and belongs to one bridge.
+ifaces_links() {
+	for _v in $VLANS; do
+		_nm=${_v%%:*} _l=${_v#*:}; _l=${_l%%:*}
+		role_of "$_l" > /dev/null || err "$1" 0 "$_nm: link $_l is not listed"
+	done
+	_used=' '
+	for _b in $BRIDGES; do
+		_nm=${_b%%:*}
+		for _p in $(echo "${_b#*:}" | tr ',' ' '); do
+			case $(role_of "$_p") in
+				'') err "$1" 0 "$_nm: port $_p is not listed" ;;
+				off) ;;
+				*) err "$1" 0 "$_nm: port $_p needs role=off (the bridge has the role)" ;;
+			esac
+			case $_used in *" $_p "*) err "$1" 0 "$_p is a port of two bridges" ;; esac
+			_used="$_used$_p "
+		done
+	done
 }
 
 # ---- rule lists -----------------------------------------------------------
@@ -411,8 +495,8 @@ config_load() {
 			_ok=1
 		}
 	done
-	if [ "$DNSMASQ" = yes ] && [ -z "$IN_IFS" ]; then
-		echo "$PXMXFW_ETC/pxmxfw.conf: DNSMASQ needs an interface with role lan or isolated" >&2
+	if [ "$DNSMASQ" = yes ] && [ -z "$ALLOW_DNS_IFS$ALLOW_DHCP_IFS" ]; then
+		echo "$PXMXFW_ETC/pxmxfw.conf: DNSMASQ needs a lan or isolated interface that allows dns or dhcp" >&2
 		_ok=1
 	fi
 	return $_ok
@@ -464,17 +548,17 @@ render_nft() {
 	l 2 "meta l4proto ipv6-icmp accept"
 	l 2 "iifname \"$WAN_IF\" udp dport 546 accept comment \"DHCPv6 client\""
 	[ -z "$WG_PORTS" ] || l 2 "udp dport { $(echo "$WG_PORTS" | sed 's/ /, /g') } accept comment \"wireguard\""
-	if [ "$WAN_PING" = yes ]; then
-		l 2 "icmp type echo-request accept"
-	elif [ -n "$IN_IFS" ]; then
-		l 2 "iifname $_in icmp type echo-request accept"
-	fi
-	if [ -n "$IN_IFS" ]; then
-		l 2 "iifname $_in tcp dport { 22, 53, $WEBUI_PORT } accept comment \"inside: ssh, dns, web UI\""
+	[ "$WAN_PING" = no ] || l 2 "iifname \"$WAN_IF\" icmp type echo-request accept"
+	# what each lan and isolated interface may reach on the firewall (allow=)
+	[ -z "$ALLOW_PING_IFS" ] || l 2 "iifname $(nft_set "$ALLOW_PING_IFS") icmp type echo-request accept"
+	[ -z "$ALLOW_SSH_IFS" ] || l 2 "iifname $(nft_set "$ALLOW_SSH_IFS") tcp dport 22 accept comment \"ssh\""
+	[ -z "$ALLOW_WEBUI_IFS" ] || l 2 "iifname $(nft_set "$ALLOW_WEBUI_IFS") tcp dport $WEBUI_PORT accept comment \"web UI\""
+	[ -z "$ALLOW_DNS_IFS" ] || l 2 "iifname $(nft_set "$ALLOW_DNS_IFS") meta l4proto { tcp, udp } th dport 53 accept comment \"dns\""
+	if [ -n "$ALLOW_DHCP_IFS" ]; then
 		if [ "$IPV6" = yes ]; then
-			l 2 "iifname $_in udp dport { 53, 67, 547 } accept comment \"inside: dns, dhcp\""
+			l 2 "iifname $(nft_set "$ALLOW_DHCP_IFS") udp dport { 67, 547 } accept comment \"dhcp\""
 		else
-			l 2 "iifname $_in udp dport { 53, 67 } accept comment \"inside: dns, dhcp\""
+			l 2 "iifname $(nft_set "$ALLOW_DHCP_IFS") udp dport 67 accept comment \"dhcp\""
 		fi
 	fi
 	[ "$WEBUI_WAN" = no ] ||
@@ -511,8 +595,9 @@ _d_host() { # ip name mac comment
 	printf 'host-record=%s,%s\n' "$2" "$1"
 	case $3 in *:*) printf 'dhcp-host=%s,%s,%s\n' "$3" "$1" "$2" ;; esac
 }
-_d_iface() { # name role addr addr6 dhcp comment
+_d_iface() { # name role addr addr6 dhcp comment type link vid ports allow
 	case $2 in lan|isolated) ;; *) return 0 ;; esac
+	case ,${11}, in *,dns,*|*,dhcp,*) ;; *) return 0 ;; esac
 	echo "interface=$1"
 	[ -z "$5" ] || echo "dhcp-range=set:$1,${5%-*},${5#*-},$DHCP_LEASE"
 	if [ "$IPV6" = yes ] && [ "$4" != none ]; then
