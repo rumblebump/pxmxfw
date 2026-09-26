@@ -65,6 +65,7 @@ func (p *principal) viaToken() bool { return p.session == "" }
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api", s.api)
+	mux.HandleFunc("/term", s.terminal)
 	files := http.FileServer(http.Dir(s.www))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" && strings.HasSuffix(r.URL.Path, "/") {
@@ -195,6 +196,8 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 		s.st.endSession(p.session)
 		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		text(w, http.StatusOK, "logged out\n")
+	case "POST:term":
+		s.termReady(w, r, p)
 	case "GET:propose-subnet":
 		s.proposeSubnet(w, p, name)
 	case "GET:pkgs":

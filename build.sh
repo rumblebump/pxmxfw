@@ -28,6 +28,11 @@ PODMAN=
 # Alpine.js for the web UI, pinned by checksum
 ALPINEJS_VERSION=3.17.4
 ALPINEJS_SHA256=81c622da24897c80071c6398253f90890449604d7b132d2509d17f7ac903c7da
+# xterm.js and its fit addon for the web terminal
+XTERM_VERSION=6.0.0
+XTERM_SHA256=908e66e04af6c8dc6b00dd3b54de088e2e81e5ed866284fd6c2fb3c2d1c7a3f6
+XTERM_FIT_VERSION=0.11.0
+XTERM_FIT_SHA256=26003b4517a132b64e4ff228fd88a5fda3fff5e606c76093f6dcff772e9ecec0
 
 SRCDIR=$(cd "$(dirname "$0")" && pwd)
 PXMXFW_VERSION=${PXMXFW_VERSION:-$(cd "$SRCDIR" && git describe --tags --always --dirty 2>/dev/null || echo dev)}
@@ -141,11 +146,19 @@ fi
 echo ">> Fetching Alpine.js $ALPINEJS_VERSION"
 curl -fsSL -o "$WORK/alpinejs.tgz" "https://registry.npmjs.org/alpinejs/-/alpinejs-$ALPINEJS_VERSION.tgz"
 echo "$ALPINEJS_SHA256  $WORK/alpinejs.tgz" | sha256sum -c - >/dev/null || die "checksum mismatch for Alpine.js"
+echo ">> Fetching xterm.js $XTERM_VERSION"
+curl -fsSL -o "$WORK/xterm.tgz" "https://registry.npmjs.org/@xterm/xterm/-/xterm-$XTERM_VERSION.tgz"
+echo "$XTERM_SHA256  $WORK/xterm.tgz" | sha256sum -c - >/dev/null || die "checksum mismatch for xterm.js"
+curl -fsSL -o "$WORK/xterm-fit.tgz" "https://registry.npmjs.org/@xterm/addon-fit/-/addon-fit-$XTERM_FIT_VERSION.tgz"
+echo "$XTERM_FIT_SHA256  $WORK/xterm-fit.tgz" | sha256sum -c - >/dev/null || die "checksum mismatch for the xterm.js fit addon"
 
 # 3. Apply the project's config
 echo ">> Applying rootfs/ overlay"
 cp -a "$SRCDIR/rootfs/." "$ROOT/"
 tar -xzf "$WORK/alpinejs.tgz" -O package/dist/cdn.min.js > "$ROOT/usr/share/pxmxfw/www/alpine.min.js"
+tar -xzf "$WORK/xterm.tgz" -O package/lib/xterm.js > "$ROOT/usr/share/pxmxfw/www/xterm.js"
+tar -xzf "$WORK/xterm.tgz" -O package/css/xterm.css > "$ROOT/usr/share/pxmxfw/www/xterm.css"
+tar -xzf "$WORK/xterm-fit.tgz" -O package/lib/addon-fit.js > "$ROOT/usr/share/pxmxfw/www/xterm-fit.js"
 install -m 755 "$WORK/pxmxfw-webui" "$ROOT/usr/sbin/pxmxfw-webui"
 # Besides root, members of this group may log in to the web UI
 grep -q '^pxmxfw:' "$ROOT/etc/group" || echo 'pxmxfw:x:990:' >> "$ROOT/etc/group"

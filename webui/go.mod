@@ -2,7 +2,11 @@ module github.com/rumblebump/pxmxfw/webui
 
 go 1.24.0
 
-require github.com/mattn/go-sqlite3 v1.14.52
+require (
+	github.com/coder/websocket v1.8.14
+	github.com/creack/pty v1.1.24
+	github.com/mattn/go-sqlite3 v1.14.52
+)
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.0

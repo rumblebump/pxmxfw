@@ -34,7 +34,7 @@ Or as root on an x86_64 Linux host with internet access (a Proxmox node works):
 
 This downloads the Alpine minirootfs (checksum verified), installs
 `alpine-base`, `nftables`, `dnsmasq`, `wireguard-tools-wg`, `linux-pam` and
-`sqlite-libs`, builds the web UI server from `webui/` with Alpine's Go, adds [Alpine.js](https://alpinejs.dev) (pinned by checksum), applies
+`sqlite-libs`, builds the web UI server from `webui/` with Alpine's Go, adds [Alpine.js](https://alpinejs.dev) and xterm.js (pinned by checksum), applies
 the files under `rootfs/`, enables the services and writes
 `out/alpine-<version>-pxmxfw-<date>_amd64.tar.gz`. Run `./build.sh -h` for
 options (Alpine version, mirror, output dir, local minirootfs).
@@ -109,6 +109,10 @@ Open `https://<LAN address>:8443` and log in as `root` (or a member of the
   `modprobe` and `/etc/modules-load.d` commands to run on the Proxmox host.
 - **Packages**: search, install and remove Alpine packages, and upgrade
   everything. Each change needs a confirmation.
+- **Terminal**: a shell in the container ([xterm.js](https://xtermjs.org)),
+  as the user you logged in with. Opening it needs a fresh confirmation;
+  it closes when you log out or after 15 minutes without typing. Opening
+  and closing are in the change log.
 - **Security**: two-factor login, access tokens and the log of recent
   changes.
 

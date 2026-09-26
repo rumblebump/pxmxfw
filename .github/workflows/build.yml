@@ -88,6 +88,10 @@ jobs:
           call --data-binary 'tcp 2222 # test' "$api?action=save&name=services"
           grep -qx 'tcp 2222 # test' /tmp/fw/etc/pxmxfw/services
           call -o /dev/null https://127.0.0.1:8443/alpine.min.js
+          # web terminal: xterm.js is served and su is there to start the shell
+          for f in xterm.js xterm-fit.js xterm.css; do call -o /dev/null "https://127.0.0.1:8443/$f"; done
+          call -X POST "$api?action=term" | grep -q '^ok'
+          test -x /tmp/fw/bin/su
           # packages: search and install a small one through the UI's API
           sudo cp -L /etc/resolv.conf /tmp/fw/etc/resolv.conf
           call "$api?action=pkg-search&name=tree" | tee search.out

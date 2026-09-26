@@ -184,6 +184,29 @@ function ifaceLine(r) {
 	return f.join(' ') + (r.comment.trim() ? ` # ${r.comment.trim()}` : '');
 }
 
+// ---- web terminal ----
+// xterm.js is loaded when the terminal is first opened. The Terminal and the
+// WebSocket live outside Alpine's reactive data, which would wrap them.
+const term = { xterm: null, fit: null, ws: null };
+function loadScript(src) {
+	return new Promise((resolve, reject) => {
+		const el = document.createElement('script');
+		el.src = src;
+		el.onload = resolve;
+		el.onerror = () => reject(new Error(`could not load ${src}`));
+		document.head.append(el);
+	});
+}
+async function loadXterm() {
+	if (window.Terminal && window.FitAddon) return;
+	const css = document.createElement('link');
+	css.rel = 'stylesheet';
+	css.href = 'xterm.css';
+	document.head.append(css);
+	await loadScript('xterm.js');
+	await loadScript('xterm-fit.js');
+}
+
 // A new interface: routed (role lan) and reachable only by ping, unless
 // the options say otherwise
 function newIface(name, o = {}) {
@@ -203,6 +226,7 @@ document.addEventListener('alpine:init', () => {
 			{ id: 'dns', label: 'DNS & DHCP' },
 			{ id: 'checks', label: 'Checks' },
 			{ id: 'packages', label: 'Packages' },
+			{ id: 'terminal', label: 'Terminal' },
 			{ id: 'security', label: 'Security' },
 		],
 		authed: null,
@@ -289,6 +313,7 @@ document.addEventListener('alpine:init', () => {
 		},
 
 		async logout() {
+			this.closeTerminal();
 			try { await api('logout', { body: '' }); } catch (e) { /* session already gone */ }
 			this.authed = false;
 		},
@@ -604,6 +629,50 @@ document.addEventListener('alpine:init', () => {
 				!this.ifaces.some(x => (x.role === 'lan' || x.role === 'isolated') && x.allow.includes('webui')))
 				this.show('warn', 'No interface allows the web UI now. After applying it can only be reached from inside the container.');
 		},
+		termOpen: false,
+		termNote: '',
+		async openTerminal() {
+			if (term.ws) return;
+			this.termNote = '';
+			try {
+				// asks for a fresh confirmation first, like a change
+				await this.call('term', { body: '' });
+				await loadXterm();
+			} catch (e) {
+				this.termNote = e.message;
+				return;
+			}
+			const box = document.getElementById('term');
+			if (!term.xterm) {
+				term.xterm = new window.Terminal({ cursorBlink: true, fontSize: 14, scrollback: 5000 });
+				term.fit = new window.FitAddon.FitAddon();
+				term.xterm.loadAddon(term.fit);
+				term.xterm.open(box);
+				term.xterm.onData(d => term.ws && term.ws.readyState === 1 && term.ws.send(new TextEncoder().encode(d)));
+				term.xterm.onResize(({ cols, rows }) => term.ws && term.ws.readyState === 1 && term.ws.send(JSON.stringify({ cols, rows })));
+				window.addEventListener('resize', () => this.tab === 'terminal' && term.fit.fit());
+			} else {
+				term.xterm.reset();
+			}
+			const ws = new WebSocket(`wss://${location.host}/term`);
+			ws.binaryType = 'arraybuffer';
+			term.ws = ws;
+			this.termOpen = true;
+			ws.onopen = () => {
+				term.fit.fit();
+				ws.send(JSON.stringify({ cols: term.xterm.cols, rows: term.xterm.rows }));
+				term.xterm.focus();
+			};
+			ws.onmessage = ev => term.xterm.write(new Uint8Array(ev.data));
+			ws.onclose = ev => {
+				term.xterm.write(`\r\n\x1b[2m[terminal closed${ev.reason ? `: ${ev.reason}` : ''}]\x1b[0m\r\n`);
+				term.ws = null;
+				this.termOpen = false;
+			};
+		},
+		closeTerminal() { if (term.ws) term.ws.close(1000, 'closed'); },
+		showTerminal() { this.$nextTick(() => term.fit && term.fit.fit()); },
+
 		async savePool() {
 			try { await this.call('pref', { name: 'subnet_pool', body: this.subnetPool.trim() }); } catch (e) { this.show('fail', e.message); }
 		},
