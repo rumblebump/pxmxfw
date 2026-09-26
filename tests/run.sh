@@ -317,7 +317,8 @@ if [ -n "$NFT" ] && command -v wg >/dev/null && [ "$(command -v wg)" != "$T/ipbi
 	printf 'tunnel wg0 port=51820\npeer wg0 key=%s allowed=10.99.0.2/32,192.168.20.0/24 # site2\n' "$(wg genkey | wg pubkey)" > "$T/etc/wireguard"
 	printf 'eth0 role=wan\nwg0 role=lan addr=10.99.0.1/24\n' > "$T/etc/interfaces"
 	PXMXFW_ETC=$T/etc "$PXMXFW" render nft > "$T/etc/ruleset.nft"
-	if unshare -n sh -c "PXMXFW_ETC='$T/etc' PXMXFW_PROCSYS='$T/procsys' PXMXFW_NFT_MAIN='$T/main.nft' PXMXFW_DNSMASQ_CONF='$T/dnsmasq.conf' '$PXMXFW' apply >/dev/null &&
+	# Own sysfs, so /sys/class/net shows this netns' interfaces
+	if unshare -nm sh -c "mount -t sysfs sysfs /sys && PXMXFW_ETC='$T/etc' PXMXFW_PROCSYS='$T/procsys' PXMXFW_NFT_MAIN='$T/main.nft' PXMXFW_DNSMASQ_CONF='$T/dnsmasq.conf' '$PXMXFW' apply >/dev/null &&
 		wg show wg0 && ip -4 addr show dev wg0 && ip -4 route show dev wg0" > "$T/out" 2>&1 &&
 		grep -q 'listening port: 51820' "$T/out" && grep -q '10.99.0.1/24' "$T/out" && grep -q '192.168.20.0/24' "$T/out"; then ok
 	else bad "real WireGuard tunnel: $(cat "$T/out")"; fi
