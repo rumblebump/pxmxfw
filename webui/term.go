@@ -8,8 +8,13 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -20,7 +25,7 @@ import (
 //
 // Opening one needs a login session (no access tokens) and a fresh
 // confirmation, like any change. The shell runs as the logged in user
-// ("su -l USER"). It closes when the session ends (logout or expiry), after
+// (its shell from /etc/passwd). It closes when the session ends (logout or expiry), after
 // termIdle without input, or when the page goes away.
 //
 // Browser to server: binary messages are keyboard input, text messages are
@@ -36,11 +41,43 @@ var termCheck = 20 * time.Second
 
 var termCount atomic.Int32
 
-// termCommand starts the shell for user; tests replace it.
-var termCommand = func(user string) *exec.Cmd {
-	c := exec.Command("/bin/su", "-l", user)
-	c.Env = []string{"TERM=xterm-256color", "LANG=C.UTF-8"}
-	c.Dir = "/"
+// termCommand starts a login shell for user; tests replace it.
+var termCommand = loginShell
+
+// loginShell runs the user's shell from /etc/passwd as that user, like a
+// login ("-sh"), in their home directory.
+func loginShell(name string) *exec.Cmd {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return exec.Command("/bin/false")
+	}
+	shell := "/bin/sh"
+	if b, err := os.ReadFile("/etc/passwd"); err == nil {
+		for _, l := range strings.Split(string(b), "\n") {
+			f := strings.Split(l, ":")
+			if len(f) == 7 && f[0] == name && f[6] != "" {
+				shell = f[6]
+			}
+		}
+	}
+	c := exec.Command(shell)
+	c.Args = []string{"-" + filepath.Base(shell)}
+	c.Dir = u.HomeDir
+	c.Env = []string{"TERM=xterm-256color", "LANG=C.UTF-8", "HOME=" + u.HomeDir, "USER=" + name,
+		"LOGNAME=" + name, "SHELL=" + shell, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	uid, _ := strconv.Atoi(u.Uid)
+	gid, _ := strconv.Atoi(u.Gid)
+	if uid != os.Geteuid() {
+		var groups []uint32
+		if ids, err := u.GroupIds(); err == nil {
+			for _, g := range ids {
+				if n, err := strconv.Atoi(g); err == nil {
+					groups = append(groups, uint32(n))
+				}
+			}
+		}
+		c.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: groups}}
+	}
 	return c
 }
 

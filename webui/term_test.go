@@ -72,3 +72,13 @@ func TestTerminal(t *testing.T) {
 		}
 	}
 }
+
+func TestLoginShell(t *testing.T) {
+	c := loginShell("root")
+	if !strings.HasPrefix(c.Args[0], "-") || c.Dir == "" || !strings.Contains(strings.Join(c.Env, " "), "USER=root") {
+		t.Fatalf("login shell for root: %q in %q, env %q", c.Args, c.Dir, c.Env)
+	}
+	if loginShell("no-such-user-here").Path != "/bin/false" {
+		t.Fatal("unknown user gets a shell")
+	}
+}
