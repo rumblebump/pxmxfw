@@ -1,9 +1,9 @@
 #!/bin/sh
 # Build the pxmxfw Proxmox LXC template.
 #
-# Downloads the Alpine minirootfs, installs OpenRC, nftables, dnsmasq and
-# busybox httpd, applies the files under rootfs/ and packs the result as a
-# template tarball for `pct create`. Run it with --podman on any x86_64
+# Downloads the Alpine minirootfs, installs OpenRC, nftables and dnsmasq,
+# builds the web UI server (Go, in webui/), applies the files under rootfs/
+# and packs the result as a template tarball for `pct create`. Run it with --podman on any x86_64
 # Linux (no root needed), or as root on an x86_64 host (a Proxmox node works).
 #
 # Usage: ./build.sh [--podman] [-v ALPINE_VERSION] [-m MIRROR] [-o OUTDIR] [-r MINIROOTFS]
@@ -20,7 +20,9 @@ ALPINE_MIRROR=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
 ARCH=x86_64
 OUTDIR=./out
 MINIROOTFS=
-PACKAGES="alpine-base nftables dnsmasq busybox-extras wireguard-tools-wg"
+PACKAGES="alpine-base nftables dnsmasq wireguard-tools-wg linux-pam sqlite-libs"
+# To build the web UI server (never installed into the template)
+BUILD_DEPS="go gcc musl-dev linux-pam-dev sqlite-dev"
 PODMAN=
 
 # Alpine.js for the web UI, pinned by checksum
@@ -70,8 +72,8 @@ mkdir -p "$ROOT" "$OUTDIR"
 OUTDIR=$(cd "$OUTDIR" && pwd)
 
 cleanup() {
-	for m in dev proc; do
-		mountpoint -q "$ROOT/$m" 2>/dev/null && umount -l "$ROOT/$m"
+	for m in "$ROOT/dev" "$ROOT/proc" "$WORK/buildroot/dev" "$WORK/buildroot/proc"; do
+		mountpoint -q "$m" 2>/dev/null && umount -l "$m"
 	done
 	rm -rf "$WORK"
 }
@@ -114,6 +116,28 @@ else
 fi
 : > "$ROOT/etc/resolv.conf"   # Proxmox writes this on container start
 
+# Build the web UI server against Alpine's musl, PAM and SQLite
+GOBUILD='cd "$1" && CGO_ENABLED=1 GOFLAGS=-mod=readonly go build -tags libsqlite3 -trimpath -ldflags "-s -w" -o "$2" .'
+echo ">> Building pxmxfw-webui"
+if [ -f /etc/alpine-release ]; then
+	apk add --no-cache $BUILD_DEPS >/dev/null
+	sh -c "$GOBUILD" gobuild "$SRCDIR/webui" "$WORK/pxmxfw-webui"
+else
+	# Not on Alpine: build in a second, throwaway Alpine chroot
+	B=$WORK/buildroot
+	mkdir -p "$B"
+	tar -xzf "$MINIROOTFS" -C "$B"
+	cp "$ROOT/etc/apk/repositories" "$B/etc/apk/repositories"
+	cp -L /etc/resolv.conf "$B/etc/resolv.conf"
+	cp -a "$SRCDIR/webui" "$B/src"
+	mount -t proc proc "$B/proc"
+	mount --bind /dev "$B/dev"
+	chroot "$B" /sbin/apk add --no-cache $BUILD_DEPS >/dev/null
+	chroot "$B" sh -c "$GOBUILD" gobuild /src /pxmxfw-webui
+	umount "$B/dev" "$B/proc"
+	cp "$B/pxmxfw-webui" "$WORK/pxmxfw-webui"
+fi
+
 echo ">> Fetching Alpine.js $ALPINEJS_VERSION"
 curl -fsSL -o "$WORK/alpinejs.tgz" "https://registry.npmjs.org/alpinejs/-/alpinejs-$ALPINEJS_VERSION.tgz"
 echo "$ALPINEJS_SHA256  $WORK/alpinejs.tgz" | sha256sum -c - >/dev/null || die "checksum mismatch for Alpine.js"
@@ -122,6 +146,9 @@ echo "$ALPINEJS_SHA256  $WORK/alpinejs.tgz" | sha256sum -c - >/dev/null || die "
 echo ">> Applying rootfs/ overlay"
 cp -a "$SRCDIR/rootfs/." "$ROOT/"
 tar -xzf "$WORK/alpinejs.tgz" -O package/dist/cdn.min.js > "$ROOT/usr/share/pxmxfw/www/alpine.min.js"
+install -m 755 "$WORK/pxmxfw-webui" "$ROOT/usr/sbin/pxmxfw-webui"
+# Besides root, members of this group may log in to the web UI
+grep -q '^pxmxfw:' "$ROOT/etc/group" || echo 'pxmxfw:x:990:' >> "$ROOT/etc/group"
 echo "$PXMXFW_VERSION" > "$ROOT/usr/share/pxmxfw/VERSION"
 mkdir -p "$ROOT/etc/nftables.d" "$ROOT/etc/dnsmasq.d"
 grep -q '^conf-dir=/etc/dnsmasq.d' "$ROOT/etc/dnsmasq.conf" ||
@@ -129,7 +156,7 @@ grep -q '^conf-dir=/etc/dnsmasq.d' "$ROOT/etc/dnsmasq.conf" ||
 # Default ruleset, used until first boot setup regenerates it
 PXMXFW_ETC=$ROOT/etc/pxmxfw PXMXFW_LIB=$ROOT/usr/lib/pxmxfw \
 	sh "$ROOT/usr/sbin/pxmxfw" render nft > "$ROOT/etc/pxmxfw/ruleset.nft"
-chown -R 0:0 "$ROOT/etc" "$ROOT/usr/lib/pxmxfw" "$ROOT/usr/share/pxmxfw" "$ROOT/usr/sbin/pxmxfw"
+chown -R 0:0 "$ROOT/etc" "$ROOT/usr/lib/pxmxfw" "$ROOT/usr/share/pxmxfw" "$ROOT/usr/sbin/pxmxfw" "$ROOT/usr/sbin/pxmxfw-webui"
 
 # OpenRC in a container: skip hardware-only services
 if [ -f "$ROOT/etc/rc.conf" ]; then

@@ -17,7 +17,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install test tools
-        run: sudo apt-get update && sudo apt-get install -y busybox dnsmasq-base nftables shellcheck wireguard-tools
+        run: sudo apt-get update && sudo apt-get install -y busybox dnsmasq-base nftables shellcheck libpam0g-dev libsqlite3-dev wireguard-tools
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: webui/go.mod
+          cache-dependency-path: webui/go.sum
+
+      - name: Web UI server (vet and tests, built with PAM)
+        working-directory: webui
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
+          go vet -tags libsqlite3 ./...
+          go test -tags libsqlite3 ./...
 
       # Lets the tests bring up a real tunnel in a network namespace
       - name: Load the wireguard module
@@ -27,7 +39,7 @@ jobs:
         run: |
           shellcheck -s sh -S warning -e SC2034 \
             rootfs/usr/sbin/pxmxfw rootfs/usr/lib/pxmxfw/lib.sh \
-            rootfs/usr/share/pxmxfw/www/cgi-bin/api rootfs/etc/init.d/pxmxfw* tests/run.sh
+            rootfs/etc/init.d/pxmxfw* tests/run.sh
 
       # As root, so generated rulesets are loaded into a throwaway netns
       - name: Tests (dash)
@@ -57,20 +69,28 @@ jobs:
 
       - name: Check the web UI login inside the template
         run: |
-          # The UI logs in with the container's root password
+          # The UI logs in through PAM with the container's root password
           echo 'root:ci-test-pw' | sudo chroot /tmp/fw chpasswd
-          # Same steps as /etc/init.d/pxmxfw-webui
-          sudo chroot /tmp/fw sh -c 'umask 077; pxmxfw webui-conf > /run/httpd.conf'
-          sudo chroot /tmp/fw /bin/busybox-extras httpd -p 127.0.0.1:8081 \
-            -h /usr/share/pxmxfw/www -c /run/httpd.conf
-          sleep 1
-          url='http://127.0.0.1:8081/cgi-bin/api?action=file&name=settings'
-          test "$(curl -s -o /dev/null -w '%{http_code}' "$url")" = 401
-          test "$(curl -s -o /dev/null -w '%{http_code}' -u root:wrong "$url")" = 401
-          curl -fsS -u root:ci-test-pw "$url" | grep -q '^IPV6=no'
-          curl -fsS -u root:ci-test-pw -o /dev/null http://127.0.0.1:8081/alpine.min.js
-          sudo pkill -f 'busybox-extras httpd' || true
-          sudo umount /tmp/fw/dev
+          sudo mount -t proc proc /tmp/fw/proc
+          sudo chroot /tmp/fw /usr/sbin/pxmxfw-webui -listen 127.0.0.1:8443 > webui.log 2>&1 &
+          for i in $(seq 40); do curl -ks -o /dev/null https://127.0.0.1:8443/ && break; sleep 0.5; done
+          api=https://127.0.0.1:8443/api
+          code() { curl -ks -b jar -c jar -H 'X-Pxmxfw: 1' -o /dev/null -w '%{http_code}' "$@"; }
+          call() { curl -fksS -b jar -c jar -H 'X-Pxmxfw: 1' "$@"; }
+          test "$(code "$api?action=file&name=settings")" = 401
+          test "$(code -d '{"user":"root","password":"wrong"}' "$api?action=login")" = 401
+          call -d '{"user":"root","password":"ci-test-pw"}' "$api?action=login"
+          call "$api?action=file&name=settings" | grep -q '^IPV6=no'
+          # changes need a fresh confirmation, and are validated by pxmxfw
+          test "$(code --data-binary 'tcp 2222' "$api?action=save&name=services")" = 403
+          call -d '{"password":"ci-test-pw"}' "$api?action=stepup"
+          test "$(code --data-binary 'tcp 22; reboot' "$api?action=save&name=services")" = 422
+          call --data-binary 'tcp 2222 # test' "$api?action=save&name=services"
+          grep -qx 'tcp 2222 # test' /tmp/fw/etc/pxmxfw/services
+          call -o /dev/null https://127.0.0.1:8443/alpine.min.js
+          sudo pkill -f pxmxfw-webui || true
+          sudo umount /tmp/fw/proc /tmp/fw/dev
+          cat webui.log
 
       - uses: actions/upload-artifact@v4
         with:

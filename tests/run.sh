@@ -112,7 +112,7 @@ fresh_etc "$T/etc"
 check_ruleset default
 grep -q 'oifname "eth0" masquerade' "$T/default.nft" && ok || bad "default has NAT"
 grep -q 'iifname { "eth1" } oifname "eth0" meta nfproto ipv4 accept' "$T/default.nft" && ok || bad "default routes LAN to WAN, IPv4 only"
-grep -q 'iifname { "eth1" } tcp dport { 22, 53, 8080 }' "$T/default.nft" && ! grep -q 'iifname "eth0" tcp dport 8080' "$T/default.nft" && ok ||
+grep -q 'iifname { "eth1" } tcp dport { 22, 53, 8443 }' "$T/default.nft" && ! grep -q 'iifname "eth0" tcp dport 8443' "$T/default.nft" && ok ||
 	bad "web UI open on LAN only"
 
 printf 'tcp 22 # ssh\nudp 60000-60100\n' >> "$T/etc/services"
@@ -127,7 +127,7 @@ grep -q 'eth4' "$T/rules.nft" && bad "role=off interface appears in rules" || ok
 sed -i 's/^NAT=.*/NAT=no/; s/^WAN_PING=.*/WAN_PING=no/; s/^WEBUI_WAN=.*/WEBUI_WAN=yes/; s/^IPV6=.*/IPV6=yes/' "$T/etc/pxmxfw.conf"
 check_ruleset variants
 grep -q masquerade "$T/variants.nft" && bad "NAT=no still masquerades" || ok
-grep -q 'iifname "eth0" tcp dport 8080 accept' "$T/variants.nft" && ok || bad "WEBUI_WAN opens the UI on WAN"
+grep -q 'iifname "eth0" tcp dport 8443 accept' "$T/variants.nft" && ok || bad "WEBUI_WAN opens the UI on WAN"
 grep -q 'nfproto ipv4 accept' "$T/variants.nft" && bad "IPV6=yes still limits forwarding to IPv4" || ok
 grep -q 'udp dport { 53, 67, 547 }' "$T/variants.nft" && ok || bad "IPV6=yes allows DHCPv6 from inside"
 
@@ -344,39 +344,6 @@ grep -q '^  modprobe -a .*nft_masq' "$T/out" && grep -q '/etc/modules-load.d/pxm
 	bad "check prints host modprobe commands"
 PATH="$T/fakebin:$PATH" PXMXFW_ETC=$T/etc "$PXMXFW" check --tsv | awk -F '\t' 'NF != 5 { exit 1 }' && ok ||
 	bad "check --tsv has 5 fields per line"
-
-# ---- CGI --------------------------------------------------------------------
-
-cgi() { # METHOD QUERY [BODY] [header value]
-	body=${3:-}
-	printf '%s' "$body" | env REQUEST_METHOD="$1" QUERY_STRING="$2" CONTENT_LENGTH="${#body}" \
-		HTTP_X_PXMXFW="${4:-}" PXMXFW="$PXMXFW" PXMXFW_ETC="$T/etc" \
-		$SH "$SRC/rootfs/usr/share/pxmxfw/www/cgi-bin/api"
-}
-fresh_etc "$T/etc"
-cgi GET 'action=file&name=settings' | grep -q '^NAT=yes' && ok || bad "cgi reads settings"
-cgi GET 'action=file&name=../../etc/shadow' | head -n1 | grep -q '^Status: 400' && ok || bad "cgi rejects unknown files"
-cgi POST 'action=save&name=services' 'tcp 22' | head -n1 | grep -q '^Status: 403' && ok || bad "cgi POST needs X-Pxmxfw"
-cgi POST 'action=save&name=services' 'tcp 22 # ssh' 1 | head -n1 | grep -q '^Status: 200' && ok || bad "cgi saves"
-grep -qx 'tcp 22 # ssh' "$T/etc/services" && ok || bad "cgi wrote the file"
-out=$(cgi POST 'action=save&name=services' 'tcp 22; reboot' 1)
-printf '%s\n' "$out" | head -n1 | grep -q '^Status: 422' && ok || bad "cgi rejects invalid rules"
-printf '%s\n' "$out" | grep -q '^line 1: ' && ok || bad "cgi reports the line number"
-grep -qx 'tcp 22 # ssh' "$T/etc/services" && ok || bad "invalid save leaves the file alone"
-find "$T/etc" -name '*.new.*' | grep -q . && bad "cgi leaves temp files" || ok
-cgi DELETE 'action=status' | head -n1 | grep -q '^Status: 405' && ok || bad "cgi rejects other methods"
-
-# ---- web UI login ---------------------------------------------------------------
-
-printf 'root:$6$salt$abcdefghijklmnopqrstuvwxyz:19000:0:::::\n' > "$T/shadow"
-PXMXFW_SHADOW=$T/shadow "$PXMXFW" webui-conf > "$T/out" 2>&1 &&
-	grep -qx '/:root:$6$salt$abcdefghijklmnopqrstuvwxyz' "$T/out" && ok || bad "webui-conf copies the root hash: $(cat "$T/out")"
-for locked in '*' '!' '' 'plaintext'; do
-	printf 'root:%s:19000:0:::::\n' "$locked" > "$T/shadow"
-	PXMXFW_SHADOW=$T/shadow "$PXMXFW" webui-conf > "$T/out" 2>/dev/null &&
-		bad "webui-conf accepts root password field '$locked'" || ok
-	[ -s "$T/out" ] && bad "webui-conf printed a config for '$locked'" || ok
-done
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

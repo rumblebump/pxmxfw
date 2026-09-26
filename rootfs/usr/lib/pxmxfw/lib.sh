@@ -95,7 +95,7 @@ settings_defaults() {
 	NAT=yes
 	WAN_PING=yes
 	IPV6=no
-	WEBUI_PORT=8080
+	WEBUI_PORT=8443
 	WEBUI_WAN=no
 	DNSMASQ=no
 	DNS_UPSTREAM=

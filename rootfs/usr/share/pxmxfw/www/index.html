@@ -10,6 +10,35 @@
 <script defer src="alpine.min.js"></script>
 </head>
 <body x-data="pxmxfw" x-init="init()">
+<!-- Login -->
+<form class="login" x-show="authed === false" x-cloak @submit.prevent="doLogin()">
+	<h1>pxmxfw</h1>
+	<label>User <input x-model="login.user" autocomplete="username" required></label>
+	<label>Password <input type="password" x-model="login.password" autocomplete="current-password" required></label>
+	<label x-show="login.needCode">Code from your authenticator app
+		<input x-model="login.code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" x-effect="login.needCode && $nextTick(() => $el.focus())">
+	</label>
+	<p class="fail" x-show="login.error" x-text="login.error"></p>
+	<button class="primary">Log in</button>
+</form>
+
+<!-- Confirm a change -->
+<div class="overlay" x-show="confirmBox.open" x-cloak>
+	<form class="dialog" @submit.prevent="submitConfirm()" @keydown.escape="cancelConfirm()">
+		<h2>Confirm this change</h2>
+		<label x-show="confirmBox.method === 'totp'">Code from your authenticator app
+			<input x-model="confirmBox.value" inputmode="numeric" autocomplete="one-time-code" maxlength="6" x-effect="confirmBox.open && $nextTick(() => $el.focus())">
+		</label>
+		<label x-show="confirmBox.method === 'password'">Your password
+			<input type="password" x-model="confirmBox.value" autocomplete="current-password">
+		</label>
+		<p class="muted">Changes stay unlocked for 5 minutes.</p>
+		<p class="fail" x-show="confirmBox.error" x-text="confirmBox.error"></p>
+		<div class="actions"><button type="button" @click="cancelConfirm()">Cancel</button> <button class="primary">Confirm</button></div>
+	</form>
+</div>
+
+<div x-show="authed" x-cloak>
 <header>
 	<h1>pxmxfw</h1>
 	<span class="host" x-text="status.hostname"></span>
@@ -20,6 +49,7 @@
 				<span class="dot" x-show="t.id === 'checks' && failedChecks.length" x-text="failedChecks.length"></span>
 			</button>
 		</template>
+		<button @click="logout()" :title="'Logged in as ' + (me.user || '')">Log out</button>
 	</nav>
 </header>
 
@@ -265,13 +295,67 @@
 
 		<div x-show="missingModules.length" x-cloak>
 			<h2>Fix on the Proxmox host</h2>
-			<label>Container ID <input x-model="ctidValue" size="6" placeholder="CTID" @input="saveCtid()"></label>
+			<label>Container ID <input x-model="ctidValue" size="6" placeholder="CTID" @change="saveCtid()"></label>
 			<p>Run this on the Proxmox host as root. It loads the modules now and on every boot, then restarts this container:</p>
 			<pre class="code" x-text="hostCommands()"></pre>
 			<button @click="copy(hostCommands())">Copy</button>
 		</div>
 		<div class="actions"><button :disabled="busy" @click="refresh()">Run checks again</button></div>
 	</section>
+
+	<!-- Security -->
+	<section x-show="tab === 'security'">
+		<h2>Two-factor login (TOTP)</h2>
+		<div x-show="me.totp === 'on'">
+			<p><span class="badge ok">on</span> Logins and changes ask for a code from your authenticator app.</p>
+			<button @click="disableTotp()">Turn off</button>
+		</div>
+		<div x-show="me.totp !== 'on'">
+			<p class="banner warn" x-show="!totpSetup">Two-factor login is off, so changes are confirmed with your password only.</p>
+			<button x-show="!totpSetup" @click="startTotp()">Set up</button>
+			<div x-show="totpSetup">
+				<p>Add this key to your authenticator app (Aegis, Google Authenticator, 1Password, ...), then enter the code it shows.</p>
+				<pre class="code" x-text="totpSetup && totpSetup.secret"></pre>
+				<p class="hint">Or paste this link into an app that accepts one: <code x-text="totpSetup && totpSetup.uri"></code></p>
+				<form class="addr" @submit.prevent="enableTotp()">
+					<input x-model="totpCode" inputmode="numeric" maxlength="6" placeholder="123456" autocomplete="one-time-code">
+					<button class="primary">Turn on</button>
+				</form>
+			</div>
+		</div>
+
+		<h2>Access tokens</h2>
+		<p class="muted">For Ansible, scripts and other automation: send <code>Authorization: Bearer TOKEN</code> to <code>/api</code>. A read token can read status and config; a write token can also save and apply. Tokens cannot manage logins or other tokens.</p>
+		<div class="banner ok" x-show="createdToken">
+			<div><b>Copy this token now, it is not shown again:</b><pre class="code" x-text="createdToken"></pre></div>
+			<button class="link" @click="copy(createdToken)">Copy</button>
+			<button class="link" @click="createdToken = ''">Done</button>
+		</div>
+		<table x-show="tokens.length">
+			<tr><th>Name</th><th>Scope</th><th>Created</th><th>Expires</th><th>Last used</th><th></th></tr>
+			<template x-for="t in tokens" :key="t.id">
+				<tr>
+					<td x-text="t.name"></td><td x-text="t.scope"></td><td x-text="t.created"></td><td x-text="t.expires"></td><td x-text="t.used"></td>
+					<td><button class="link" @click="deleteToken(t)">Delete</button></td>
+				</tr>
+			</template>
+		</table>
+		<form class="addr" @submit.prevent="createToken()">
+			<input x-model="newToken.name" placeholder="name, e.g. ansible" required>
+			<select x-model="newToken.scope"><option value="write">write</option><option value="read">read</option></select>
+			<label>valid for <input type="number" min="1" max="3650" x-model="newToken.days" size="5"> days</label>
+			<button>Create token</button>
+		</form>
+
+		<h2>Recent changes</h2>
+		<table x-show="audit.length">
+			<tr><th>When</th><th>User</th><th>What</th><th></th></tr>
+			<template x-for="(a, i) in audit" :key="i">
+				<tr><td x-text="a.ts"></td><td x-text="a.user"></td><td x-text="a.action"></td><td x-text="a.detail"></td></tr>
+			</template>
+		</table>
+	</section>
 </main>
+</div>
 </body>
 </html>

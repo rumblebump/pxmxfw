@@ -1,0 +1,4 @@
+# PAM stack for the pxmxfw web UI. Only root and members of the pxmxfw
+# group may log in; the UI adds TOTP on top of this.
+auth     required pam_unix.so
+account  required pam_unix.so
