@@ -39,4 +39,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" out/*.tar.gz --generate-notes
+        run: |
+          cd out
+          # Fixed name so releases/latest/download/pxmxfw_amd64.tar.gz always works
+          cp alpine-*-pxmxfw-*_amd64.tar.gz pxmxfw_amd64.tar.gz
+          sha256sum *.tar.gz > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" *.tar.gz SHA256SUMS --generate-notes

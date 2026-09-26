@@ -5,6 +5,18 @@ A small Alpine Linux container template that routes and filters traffic
 between a WAN interface (`eth0`) and a LAN interface (`eth1`) using
 nftables, with dnsmasq serving DNS and DHCP on the LAN.
 
+## Download
+
+Each `v*` release has a ready-made template. On the Proxmox host:
+
+```sh
+cd /var/lib/vz/template/cache
+wget https://github.com/rumblebump/pxmxfw/releases/latest/download/pxmxfw_amd64.tar.gz
+```
+
+Or in the web UI: *local* storage, *CT Templates*, *Download from URL*, with
+the same link. `SHA256SUMS` in the release lists the checksums.
+
 ## Build the template
 
 On an x86_64 Linux host with internet access (a Proxmox node works), as root:
@@ -25,9 +37,11 @@ attaches it to a GitHub release.
 
 ## Create the container
 
+If you built the template yourself, copy it from `out/` to
+`/var/lib/vz/template/cache/` first and use its file name below.
+
 ```sh
-cp out/alpine-*-pxmxfw-*_amd64.tar.gz /var/lib/vz/template/cache/
-pct create 200 local:vztmpl/alpine-<version>-pxmxfw-<date>_amd64.tar.gz \
+pct create 200 local:vztmpl/pxmxfw_amd64.tar.gz \
   --hostname pxmxfw --ostype alpine --unprivileged 1 \
   --cores 1 --memory 128 --rootfs local-lvm:1 \
   --net0 name=eth0,bridge=vmbr0,ip=dhcp \
