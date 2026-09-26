@@ -50,6 +50,10 @@ also attaches it to a GitHub release.
 
 ## Create the container
 
+[docs/proxmox-setup.md](docs/proxmox-setup.md) is the full walk-through:
+the two bridges, privileged vs unprivileged, nesting, IP forwarding, the
+host kernel modules and `pct create`. The short version:
+
 If you built the template yourself, copy it from `out/` to
 `/var/lib/vz/template/cache/` first and use its file name below.
 
