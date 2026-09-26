@@ -18,6 +18,11 @@ wget https://github.com/rumblebump/pxmxfw/releases/latest/download/pxmxfw_amd64.
 Or in the web UI: *local* storage, *CT Templates*, *Download from URL*, with
 the same link. `SHA256SUMS` in the release lists the checksums.
 
+The newest build of `main` (for testing, not a release) is always at
+`https://github.com/rumblebump/pxmxfw/releases/download/edge/pxmxfw_amd64.tar.gz`.
+The zipped files under a workflow run's *Artifacts* need a GitHub login, so
+Proxmox cannot download those.
+
 ## Build the template
 
 With [podman](https://podman.io) on any x86_64 Linux, no root needed:

@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write
 
+# one run per branch or tag at a time, so edge releases never race
+concurrency:
+  group: build-${{ github.ref }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -121,3 +125,20 @@ jobs:
           cp alpine-*-pxmxfw-*_amd64.tar.gz pxmxfw_amd64.tar.gz
           sha256sum *.tar.gz > SHA256SUMS
           gh release create "$GITHUB_REF_NAME" *.tar.gz SHA256SUMS --generate-notes
+
+      # Every merge to main replaces the "edge" prerelease, so the newest
+      # build has a fixed URL Proxmox can download (workflow artifacts are
+      # zipped and need a GitHub login):
+      # releases/download/edge/pxmxfw_amd64.tar.gz
+      - name: Update the edge prerelease
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd out
+          cp alpine-*-pxmxfw-*_amd64.tar.gz pxmxfw_amd64.tar.gz
+          sha256sum pxmxfw_amd64.tar.gz > SHA256SUMS
+          gh release delete edge --cleanup-tag --yes 2>/dev/null || true
+          gh release create edge pxmxfw_amd64.tar.gz SHA256SUMS --prerelease --latest=false \
+            --target "$GITHUB_SHA" --title "edge (latest main)" \
+            --notes "Built from ${GITHUB_SHA::7} on main. Not a release; use a v* release for production."
