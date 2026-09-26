@@ -108,9 +108,16 @@ The UI is served by `pxmxfw-webui`, a small Go server (source in `webui/`).
   changes apply at once and other PAM modules can be added there.
 - **Two-factor login (TOTP)**: turn it on under Security with any
   authenticator app. Logins then need the code as well.
+- **Security keys** (Nitrokey, YubiKey, any FIDO2 key): add them under
+  Security. Logins then need the key, and it confirms changes with a touch.
+  Browsers only allow security keys on a host name with a trusted
+  certificate, so open the UI by name (for example `https://fw.lan:8443`)
+  and install a certificate for that name in `/etc/pxmxfw/tls/`. A key only
+  works under the name it was added with. TOTP, if set up, stays usable as
+  a fallback.
 - **Changes are confirmed**: saving, applying, and managing tokens or 2FA
-  ask for a fresh TOTP code (or the password, without TOTP). A
-  confirmation lasts 5 minutes.
+  ask for a fresh confirmation: a security key touch or TOTP code, or the
+  password when neither is set up. A confirmation lasts 5 minutes.
 - **Access tokens** for Ansible and scripts: create one under Security and
   send it as `Authorization: Bearer pxm_...`. A `read` token can read status
   and files; a `write` token can also `save` and `apply`, without the

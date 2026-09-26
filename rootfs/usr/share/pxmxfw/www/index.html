@@ -15,8 +15,9 @@
 	<h1>pxmxfw</h1>
 	<label>User <input x-model="login.user" autocomplete="username" required></label>
 	<label>Password <input type="password" x-model="login.password" autocomplete="current-password" required></label>
-	<label x-show="login.needCode">Code from your authenticator app
-		<input x-model="login.code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" x-effect="login.needCode && $nextTick(() => $el.focus())">
+	<button type="button" x-show="login.need.includes('webauthn')" @click="loginWithKey()">Use security key</button>
+	<label x-show="login.need.includes('totp')"><span x-text="login.need.includes('webauthn') ? 'Or the code from your authenticator app' : 'Code from your authenticator app'"></span>
+		<input x-model="login.code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" x-effect="login.need.includes('totp') && $nextTick(() => $el.focus())">
 	</label>
 	<p class="fail" x-show="login.error" x-text="login.error"></p>
 	<button class="primary">Log in</button>
@@ -26,10 +27,11 @@
 <div class="overlay" x-show="confirmBox.open" x-cloak>
 	<form class="dialog" @submit.prevent="submitConfirm()" @keydown.escape="cancelConfirm()">
 		<h2>Confirm this change</h2>
-		<label x-show="confirmBox.method === 'totp'">Code from your authenticator app
+		<p x-show="confirmBox.methods.includes('webauthn')">Touch your security key. <button type="button" class="link" @click="confirmWithKey()">Try again</button></p>
+		<label x-show="confirmBox.methods.includes('totp')"><span x-text="confirmBox.methods.includes('webauthn') ? 'Or the code from your authenticator app' : 'Code from your authenticator app'"></span>
 			<input x-model="confirmBox.value" inputmode="numeric" autocomplete="one-time-code" maxlength="6" x-effect="confirmBox.open && $nextTick(() => $el.focus())">
 		</label>
-		<label x-show="confirmBox.method === 'password'">Your password
+		<label x-show="confirmBox.methods.includes('password')">Your password
 			<input type="password" x-model="confirmBox.value" autocomplete="current-password">
 		</label>
 		<p class="muted">Changes stay unlocked for 5 minutes.</p>
@@ -322,6 +324,24 @@
 					<button class="primary">Turn on</button>
 				</form>
 			</div>
+		</div>
+
+		<h2>Security keys</h2>
+		<p class="muted">Nitrokey, YubiKey and other FIDO2 keys. Once one is added, logins and changes ask for it (an authenticator app code still works as a fallback if you set one up).</p>
+		<p class="banner warn" x-show="me.keys_unavailable" x-text="me.keys_unavailable + '. The certificate must also be trusted by the browser: put your own in /etc/pxmxfw/tls/.'"></p>
+		<div x-show="!me.keys_unavailable">
+			<table x-show="keys.length">
+				<tr><th>Name</th><th>Added</th><th>Last used</th><th></th></tr>
+				<template x-for="k in keys" :key="k.id">
+					<tr><td x-text="k.name"></td><td x-text="k.created"></td><td x-text="k.used"></td>
+						<td><button class="link" @click="deleteKey(k)">Remove</button></td></tr>
+				</template>
+			</table>
+			<p class="muted">Keys are tied to the host name <b x-text="me.rpid"></b>; open the UI under that name to use them.</p>
+			<form class="addr" @submit.prevent="addKey()">
+				<input x-model="newKeyName" placeholder="name, e.g. yubikey" required>
+				<button>Add security key</button>
+			</form>
 		</div>
 
 		<h2>Access tokens</h2>

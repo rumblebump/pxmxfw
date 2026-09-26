@@ -5,8 +5,9 @@
 const API = 'api';
 
 class ApiError extends Error {
-	constructor(message, res) {
+	constructor(message, res, text) {
 		super(message);
+		this.text = text;
 		this.status = res.status;
 		this.stepup = res.headers.get('X-Pxmxfw-Stepup');
 		this.need = res.headers.get('X-Pxmxfw-Need');
@@ -23,8 +24,50 @@ async function api(action, { name, body } = {}) {
 	};
 	const res = await fetch(`${API}?${q}`, opts);
 	const text = await res.text();
-	if (!res.ok) throw new ApiError(text.trim() || `${res.status} ${res.statusText}`, res);
+	if (!res.ok) {
+		const json = (res.headers.get('Content-Type') || '').startsWith('application/json');
+		throw new ApiError(json ? `${res.status} ${res.statusText}` : (text.trim() || `${res.status} ${res.statusText}`), res, text);
+	}
 	return text;
+}
+
+// ---- security keys (WebAuthn) ----
+// The server sends options with base64url strings; the browser wants
+// ArrayBuffers, and its answers go back as base64url again.
+
+const fromB64 = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)).buffer;
+const toB64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const creds = list => (list || []).map(c => ({ ...c, id: fromB64(c.id) }));
+
+async function keyCreate(options) {
+	const pk = options.publicKey;
+	const cred = await navigator.credentials.create({ publicKey: {
+		...pk, challenge: fromB64(pk.challenge), user: { ...pk.user, id: fromB64(pk.user.id) },
+		excludeCredentials: creds(pk.excludeCredentials),
+	} });
+	return JSON.stringify({
+		id: cred.id, rawId: toB64(cred.rawId), type: cred.type,
+		response: {
+			clientDataJSON: toB64(cred.response.clientDataJSON),
+			attestationObject: toB64(cred.response.attestationObject),
+			transports: cred.response.getTransports ? cred.response.getTransports() : [],
+		},
+	});
+}
+
+async function keyGet(options) {
+	const pk = options.publicKey;
+	const cred = await navigator.credentials.get({ publicKey: {
+		...pk, challenge: fromB64(pk.challenge), allowCredentials: creds(pk.allowCredentials),
+	} });
+	const r = cred.response;
+	return {
+		id: cred.id, rawId: toB64(cred.rawId), type: cred.type,
+		response: {
+			clientDataJSON: toB64(r.clientDataJSON), authenticatorData: toB64(r.authenticatorData),
+			signature: toB64(r.signature), userHandle: r.userHandle ? toB64(r.userHandle) : null,
+		},
+	};
 }
 
 function date(unix) {
@@ -143,8 +186,10 @@ document.addEventListener('alpine:init', () => {
 			{ id: 'security', label: 'Security' },
 		],
 		authed: null,
-		login: { user: 'root', password: '', code: '', needCode: false, error: '' },
-		confirmBox: { open: false, method: '', value: '', error: '' },
+		login: { user: 'root', password: '', code: '', need: [], flow: null, error: '' },
+		confirmBox: { open: false, methods: [], value: '', error: '' },
+		keys: [],
+		newKeyName: '',
 		me: {},
 		totpSetup: null,
 		totpCode: '',
@@ -178,19 +223,36 @@ document.addEventListener('alpine:init', () => {
 		async start() {
 			this.authed = true;
 			this.login.password = this.login.code = this.login.error = '';
-			this.login.needCode = false;
+			this.login.need = [];
+			this.login.flow = null;
 			await Promise.all([this.refresh(), this.loadConfig(), this.loadSecurity()]);
 			try { this.ctidValue = parseKV(await this.call('prefs')).ctid || ''; } catch (e) { /* not important */ }
 		},
 
-		async doLogin() {
+		async doLogin(extra = {}) {
 			this.login.error = '';
+			const l = this.login;
 			try {
-				await api('login', { body: JSON.stringify({ user: this.login.user, password: this.login.password, code: this.login.code }) });
+				await api('login', { body: JSON.stringify({ user: l.user, password: l.password, code: l.code, ...extra }) });
 				await this.start();
 			} catch (e) {
-				if (e.need === 'totp') this.login.needCode = true;
-				else this.login.error = e.message;
+				if (!e.need) { l.error = e.message; return; }
+				// the password was right; a second factor is needed
+				const reply = JSON.parse(e.text);
+				l.need = reply.need;
+				l.flow = reply.flow ? { flow: reply.flow, options: reply.options } : null;
+				if (l.flow && !extra.flow) await this.loginWithKey();
+			}
+		},
+		async loginWithKey() {
+			const f = this.login.flow;
+			if (!f) return this.doLogin(); // used up: get a new challenge (which asks for the key)
+			this.login.flow = null;
+			try {
+				const assertion = await keyGet(f.options);
+				await this.doLogin({ flow: f.flow, assertion });
+			} catch (e) {
+				this.login.error = `Security key: ${e.message}`;
 			}
 		},
 
@@ -208,19 +270,33 @@ document.addEventListener('alpine:init', () => {
 			} catch (e) {
 				if (e.status === 401) this.authed = false;
 				if (e.status !== 403 || !e.stepup) throw e;
-				await this.confirm(e.stepup);
+				await this.confirm(e.stepup.split(','));
 				return await api(action, opts);
 			}
 		},
 
-		confirm(method) {
+		confirm(methods) {
 			return new Promise((resolve, reject) => {
-				this.confirmBox = { open: true, method, value: '', error: '', resolve, reject };
+				this.confirmBox = { open: true, methods, value: '', error: '', resolve, reject };
+				if (methods.includes('webauthn')) this.confirmWithKey();
 			});
+		},
+		async confirmWithKey() {
+			const b = this.confirmBox;
+			b.error = '';
+			try {
+				const fr = JSON.parse(await api('stepup-begin', { body: '' }));
+				const assertion = await keyGet(fr.options);
+				await api('stepup', { body: JSON.stringify({ flow: fr.flow, assertion }) });
+				b.open = false;
+				b.resolve();
+			} catch (e) {
+				b.error = `Security key: ${e.message}`;
+			}
 		},
 		async submitConfirm() {
 			const b = this.confirmBox;
-			const body = b.method === 'totp' ? { code: b.value } : { password: b.value };
+			const body = b.methods.includes('totp') ? { code: b.value } : { password: b.value };
 			try {
 				await api('stepup', { body: JSON.stringify(body) });
 				b.open = false;
@@ -237,8 +313,12 @@ document.addEventListener('alpine:init', () => {
 
 		async loadSecurity() {
 			try {
-				const [me, tk, au] = await Promise.all([this.call('me'), this.call('tokens'), this.call('audit')]);
+				const [me, tk, au, ks] = await Promise.all([this.call('me'), this.call('tokens'), this.call('audit'), this.call('keys')]);
 				this.me = parseKV(me);
+				this.keys = lines(ks).map(l => {
+					const [id, name, created, used] = l.split('\t');
+					return { id, name, created: date(created), used: used === '0' ? 'never' : date(used) };
+				});
 				this.tokens = lines(tk).map(l => {
 					const [id, name, scope, created, expires, used] = l.split('\t');
 					return { id, name, scope, created: date(created), expires: date(expires), used: used === '0' ? 'never' : date(used) };
@@ -271,6 +351,20 @@ document.addEventListener('alpine:init', () => {
 				await this.call('totp-disable', { body: '' });
 				this.show('ok', 'Two-factor login is off.');
 			} catch (e) { this.show('fail', e.message); }
+			await this.loadSecurity();
+		},
+		async addKey() {
+			try {
+				const fr = JSON.parse(await this.call('key-register-begin', { body: JSON.stringify({ name: this.newKeyName }) }));
+				const body = await keyCreate(fr.options);
+				await this.call('key-register-finish', { name: fr.flow, body });
+				this.newKeyName = '';
+				this.show('ok', 'Security key added. Logins and changes now ask for it.');
+			} catch (e) { this.show('fail', `Could not add the key: ${e.message}`); }
+			await this.loadSecurity();
+		},
+		async deleteKey(k) {
+			try { await this.call('key-delete', { name: k.id, body: '' }); } catch (e) { this.show('fail', e.message); }
 			await this.loadSecurity();
 		},
 		async createToken() {
