@@ -1,0 +1,57 @@
+:root {
+	--bg: #f6f7f9; --panel: #fff; --text: #1d2330; --muted: #667085; --line: #dde1e7;
+	--accent: #2563eb; --ok: #15803d; --warn: #b45309; --fail: #b91c1c;
+	--ok-bg: #e8f5ec; --warn-bg: #fdf3e2; --fail-bg: #fdecec;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #12151b; --panel: #1b1f27; --text: #e5e7eb; --muted: #9aa3b2; --line: #2d333d;
+		--accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --fail: #f87171;
+		--ok-bg: #16281d; --warn-bg: #2d2413; --fail-bg: #311919;
+	}
+}
+* { box-sizing: border-box; }
+[x-cloak] { display: none !important; }
+body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header h1 { font-size: 18px; margin: 0; }
+.host { color: var(--muted); }
+nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+nav button { border: 0; background: none; padding: 6px 10px; border-radius: 6px; color: var(--muted); }
+nav button.active { background: var(--bg); color: var(--text); font-weight: 600; }
+.dot { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--fail); color: #fff; font-size: 12px; }
+main { max-width: 960px; margin: 0 auto; padding: 16px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px 16px 16px; overflow-x: auto; }
+h2 { font-size: 15px; margin: 20px 0 8px; }
+h3 { font-size: 12px; margin: 0 0 4px; color: var(--muted); font-weight: 500; text-transform: uppercase; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 16px; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.card b { font-size: 18px; }
+.ok { color: var(--ok); } .fail { color: var(--fail); }
+table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 500; color: var(--muted); font-size: 12px; }
+input, select { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; max-width: 100%; }
+td input { width: 100%; }
+.form { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 20px; }
+.form label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
+.form label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+button { font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 6px; padding: 6px 12px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .6; cursor: default; }
+button.link { border: 0; background: none; color: var(--accent); padding: 0 4px; }
+.actions { margin-top: 16px; display: flex; justify-content: flex-end; }
+.muted { color: var(--muted); }
+.banner { display: flex; gap: 12px; justify-content: space-between; align-items: flex-start; padding: 10px 12px; border-radius: 8px; margin: 0 0 12px; }
+section .banner { margin-top: 16px; }
+.banner pre { margin: 0; white-space: pre-wrap; font: inherit; }
+.banner.ok { background: var(--ok-bg); } .banner.warn { background: var(--warn-bg); } .banner.fail { background: var(--fail-bg); }
+.badge { font-size: 12px; padding: 1px 8px; border-radius: 9px; }
+.badge.ok { background: var(--ok-bg); color: var(--ok); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.fail { background: var(--fail-bg); color: var(--fail); }
+.hint { margin-top: 4px; color: var(--muted); }
+pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow-x: auto; }
+.addr { display: flex; gap: 6px; flex-wrap: wrap; }
+.addr input { width: auto; flex: 1 1 110px; }
+.badge + .badge, span + .badge { margin-left: 6px; }

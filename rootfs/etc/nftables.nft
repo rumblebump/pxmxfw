@@ -1,57 +1,10 @@
 #!/usr/sbin/nft -f
-# pxmxfw ruleset: eth0 = WAN (upstream), eth1 = LAN (protected network).
-# Edit the defines below, then apply with: rc-service nftables reload
+# Loaded by the nftables service at boot and by "pxmxfw apply".
+# The pxmxfw rules are generated from /etc/pxmxfw; change them in the web UI
+# or in those files, then run "pxmxfw apply". Put hand-written extra rules in
+# /etc/nftables.d/*.nft.
 
 flush ruleset
 
-define WAN = "eth0"
-define LAN = "eth1"
-
-table inet filter {
-	chain input {
-		type filter hook input priority filter; policy drop;
-
-		ct state established,related accept
-		ct state invalid drop
-		iifname "lo" accept
-
-		meta l4proto { icmp, ipv6-icmp } accept
-
-		# Management and services for the LAN side only
-		iifname $LAN tcp dport 22 accept
-		iifname $LAN udp dport { 53, 67 } accept
-		iifname $LAN tcp dport 53 accept
-		# DHCPv6 client on the WAN side
-		iifname $WAN udp dport 546 accept
-	}
-
-	chain forward {
-		type filter hook forward priority filter; policy drop;
-
-		ct state established,related accept
-		ct state invalid drop
-
-		iifname $LAN oifname $WAN accept
-
-		# Port forwards: add a dnat rule in "nat prerouting" and allow it here, e.g.
-		# iifname $WAN oifname $LAN ip daddr 192.168.10.10 tcp dport 443 accept
-	}
-
-	chain output {
-		type filter hook output priority filter; policy accept;
-	}
-}
-
-table ip nat {
-	chain prerouting {
-		type nat hook prerouting priority dstnat;
-		# iifname $WAN tcp dport 443 dnat to 192.168.10.10
-	}
-
-	chain postrouting {
-		type nat hook postrouting priority srcnat;
-		oifname $WAN masquerade
-	}
-}
-
+include "/etc/pxmxfw/ruleset.nft"
 include "/etc/nftables.d/*.nft"

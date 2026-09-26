@@ -1,0 +1,4 @@
+# Port forwards from WAN to a machine on the LAN.
+# Format: tcp|udp WANPORT LANIP LANPORT [# comment]
+# Example:
+# tcp 443 192.168.10.10 443 # web server

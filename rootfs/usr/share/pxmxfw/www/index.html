@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pxmxfw</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+<script defer src="app.js"></script>
+<script defer src="alpine.min.js"></script>
+</head>
+<body x-data="pxmxfw" x-init="init()">
+<header>
+	<h1>pxmxfw</h1>
+	<span class="host" x-text="status.hostname"></span>
+	<nav>
+		<template x-for="t in tabs" :key="t.id">
+			<button :class="{ active: tab === t.id }" @click="tab = t.id">
+				<span x-text="t.label"></span>
+				<span class="dot" x-show="t.id === 'checks' && failedChecks.length" x-text="failedChecks.length"></span>
+			</button>
+		</template>
+	</nav>
+</header>
+
+<main>
+	<div class="banner" :class="message.kind" x-show="message.text" x-cloak>
+		<pre x-text="message.text"></pre>
+		<button class="link" @click="message.text = ''">Dismiss</button>
+	</div>
+
+	<!-- Status -->
+	<section x-show="tab === 'status'">
+		<div class="banner fail" x-show="failedChecks.length" x-cloak>
+			<span x-text="failedChecks.length + ' check(s) failed, so the firewall may not work.'"></span>
+			<button class="link" @click="tab = 'checks'">Open checks</button>
+		</div>
+		<div class="banner warn" x-show="settings.WEBUI_WAN === 'yes'" x-cloak>
+			The web UI is reachable from WAN. Turn this off under Firewall once the LAN side works.
+		</div>
+		<div class="cards">
+			<div class="card"><h3>Firewall</h3><b :class="status.firewall === 'active' ? 'ok' : 'fail'" x-text="status.firewall || '...'"></b></div>
+			<div class="card"><h3>DNS / DHCP</h3><b :class="{ ok: status.dnsmasq === 'running', fail: status.dnsmasq === 'stopped' }" x-text="status.dnsmasq || '...'"></b></div>
+			<div class="card"><h3>Forwarding</h3><b :class="status.ip_forward === '1' ? 'ok' : 'fail'" x-text="status.ip_forward === '1' ? 'on' : 'off'"></b></div>
+			<div class="card"><h3>Uptime</h3><b x-text="uptime()"></b></div>
+		</div>
+		<h2>Interfaces</h2>
+		<table>
+			<tr><th>Interface</th><th>Role</th><th>Addresses</th></tr>
+			<template x-for="i in status.ifaces" :key="i.name">
+				<tr>
+					<td x-text="i.name"></td>
+					<td><span x-text="i.role"></span><span class="badge fail" x-show="i.state === 'missing'">missing</span></td>
+					<td x-text="addrsOf(i.name) || '-'"></td>
+				</tr>
+			</template>
+		</table>
+		<p class="muted">Alpine <span x-text="status.alpine"></span>, pxmxfw <span x-text="status.version"></span>.</p>
+	</section>
+
+	<!-- Interfaces -->
+	<section x-show="tab === 'interfaces'">
+		<h2>Interfaces</h2>
+		<p class="muted">
+			The WAN (eth0) gets its address from Proxmox. NICs you add to the container show up here switched off; give them a role to use them.
+			<b>lan</b> reaches WAN and the other lans, <b>isolated</b> reaches WAN only, <b>off</b> drops everything.
+		</p>
+		<table>
+			<tr><th>Interface</th><th>Role</th><th>IPv4</th><th x-show="ipv6()">IPv6</th><th>DHCP range</th><th>Comment</th></tr>
+			<template x-for="r in ifaces" :key="r.name">
+				<tr>
+					<td>
+						<b x-text="r.name"></b>
+						<div class="hint" x-text="nowOf(r)"></div>
+					</td>
+					<td>
+						<span x-show="r.role === 'wan'">wan</span>
+						<select x-show="r.role !== 'wan'" x-model="r.role"><option>lan</option><option>isolated</option><option>off</option></select>
+					</td>
+					<td>
+						<span x-show="r.role === 'wan'">from Proxmox</span>
+						<div x-show="r.role !== 'wan'" class="addr">
+							<select x-model="r.addrMode"><option value="proxmox">from Proxmox</option><option value="static">static</option><option value="none">none</option></select>
+							<input x-show="r.addrMode === 'static'" x-model="r.addr" placeholder="192.168.20.1/24">
+						</div>
+					</td>
+					<td x-show="ipv6()">
+						<span x-show="r.role === 'wan'">from Proxmox</span>
+						<div x-show="r.role !== 'wan'" class="addr">
+							<select x-model="r.addr6Mode"><option value="proxmox">from Proxmox</option><option value="static">static</option><option value="none">none</option></select>
+							<input x-show="r.addr6Mode === 'static'" x-model="r.addr6" placeholder="fd00:20::1/64">
+						</div>
+					</td>
+					<td>
+						<div x-show="r.role === 'lan' || r.role === 'isolated'" class="addr">
+							<input x-model="r.dhcpStart" placeholder="start" size="13">
+							<input x-model="r.dhcpEnd" placeholder="end" size="13">
+						</div>
+					</td>
+					<td><input x-model="r.comment"></td>
+				</tr>
+			</template>
+		</table>
+		<p class="muted" x-show="!settings.DNSMASQ || settings.DNSMASQ === 'no'">DHCP ranges are used once dnsmasq is turned on under DNS &amp; DHCP.</p>
+
+		<h2>IPv6</h2>
+		<div class="form">
+			<label class="check"><input type="checkbox" :checked="ipv6()" @change="yn('IPV6', $event)"> Route IPv6 (off: only IPv4 is forwarded)</label>
+		</div>
+		<div class="actions"><button class="primary" :disabled="busy" @click="saveApply()">Save and apply</button></div>
+	</section>
+
+	<!-- Firewall -->
+	<section x-show="tab === 'firewall'">
+		<h2>General</h2>
+		<div class="form">
+			<label class="check"><input type="checkbox" :checked="settings.NAT === 'yes'" @change="yn('NAT', $event)"> NAT (masquerade out of WAN)</label>
+			<label class="check"><input type="checkbox" :checked="settings.WAN_PING === 'yes'" @change="yn('WAN_PING', $event)"> Answer ping on WAN</label>
+			<label>Web UI port <input type="number" min="1" max="65535" x-model="settings.WEBUI_PORT"></label>
+			<label class="check"><input type="checkbox" :checked="settings.WEBUI_WAN === 'yes'" @change="yn('WEBUI_WAN', $event)"> Allow the web UI from WAN</label>
+		</div>
+		<p class="muted">From lan and isolated interfaces, SSH, DNS, DHCP and the web UI are always allowed. Everything else coming in from WAN is dropped unless listed below.</p>
+
+		<h2>Open on WAN</h2>
+		<table>
+			<tr><th>Protocol</th><th>Port</th><th>Comment</th><th></th></tr>
+			<template x-for="(r, i) in services" :key="i">
+				<tr>
+					<td><select x-model="r.proto"><option>tcp</option><option>udp</option></select></td>
+					<td><input x-model="r.port" placeholder="22 or 60000-60100"></td>
+					<td><input x-model="r.comment"></td>
+					<td><button class="link" @click="services.splice(i, 1)">Remove</button></td>
+				</tr>
+			</template>
+		</table>
+		<button @click="services.push({ proto: 'tcp', port: '', comment: '' })">Add service</button>
+
+		<h2>Port forwards</h2>
+		<table>
+			<tr><th>Protocol</th><th>WAN port</th><th>LAN address</th><th>LAN port</th><th>Comment</th><th></th></tr>
+			<template x-for="(r, i) in forwards" :key="i">
+				<tr>
+					<td><select x-model="r.proto"><option>tcp</option><option>udp</option></select></td>
+					<td><input x-model="r.wanport" size="6"></td>
+					<td><input x-model="r.lanip" placeholder="192.168.10.10"></td>
+					<td><input x-model="r.lanport" size="6"></td>
+					<td><input x-model="r.comment"></td>
+					<td><button class="link" @click="forwards.splice(i, 1)">Remove</button></td>
+				</tr>
+			</template>
+		</table>
+		<button @click="forwards.push({ proto: 'tcp', wanport: '', lanip: '', lanport: '', comment: '' })">Add forward</button>
+		<div class="actions"><button class="primary" :disabled="busy" @click="saveApply()">Save and apply</button></div>
+	</section>
+
+	<!-- DNS & DHCP -->
+	<section x-show="tab === 'dns'">
+		<h2>DNS and DHCP (dnsmasq)</h2>
+		<div class="form">
+			<label class="check"><input type="checkbox" :checked="settings.DNSMASQ === 'yes'" @change="yn('DNSMASQ', $event)"> Run dnsmasq on the LAN</label>
+			<label>Upstream DNS <input x-model="settings.DNS_UPSTREAM" placeholder="empty: use the servers Proxmox set"></label>
+			<label>Local domain <input x-model="settings.DNS_DOMAIN"></label>
+			<label>DHCP lease time <input x-model="settings.DHCP_LEASE" placeholder="12h"></label>
+		</div>
+		<p class="muted">dnsmasq answers DNS on every lan and isolated interface, and hands out addresses where the interface has a DHCP range (see Interfaces).</p>
+
+		<h2>Hosts</h2>
+		<p class="muted">A name makes the address resolvable as name.<span x-text="settings.DNS_DOMAIN"></span>. With a MAC, DHCP always gives that machine this address.</p>
+		<table>
+			<tr><th>Address</th><th>Name</th><th>MAC (optional)</th><th>Comment</th><th></th></tr>
+			<template x-for="(r, i) in hosts" :key="i">
+				<tr>
+					<td><input x-model="r.ip"></td>
+					<td><input x-model="r.name"></td>
+					<td><input x-model="r.mac" placeholder="52:54:00:12:34:56"></td>
+					<td><input x-model="r.comment"></td>
+					<td><button class="link" @click="hosts.splice(i, 1)">Remove</button></td>
+				</tr>
+			</template>
+		</table>
+		<button @click="hosts.push({ ip: '', name: '', mac: '', comment: '' })">Add host</button>
+
+		<h2>Current leases</h2>
+		<table x-show="leases.length">
+			<tr><th>Address</th><th>Name</th><th>MAC</th><th>Expires</th></tr>
+			<template x-for="l in leases" :key="l[2]">
+				<tr><td x-text="l[2]"></td><td x-text="l[3]"></td><td x-text="l[1]"></td><td x-text="l[0]"></td></tr>
+			</template>
+		</table>
+		<p class="muted" x-show="!leases.length">No leases.</p>
+		<div class="actions"><button class="primary" :disabled="busy" @click="saveApply()">Save and apply</button></div>
+	</section>
+
+	<!-- Checks -->
+	<section x-show="tab === 'checks'">
+		<h2>System checks</h2>
+		<p class="muted">A container uses the Proxmox host's kernel and cannot load kernel modules itself. Anything missing here has to be fixed on the host.</p>
+		<table>
+			<tr><th></th><th>Check</th><th>Result</th></tr>
+			<template x-for="c in checks" :key="c.id">
+				<tr>
+					<td><span class="badge" :class="c.status" x-text="c.status"></span></td>
+					<td x-text="c.title"></td>
+					<td>
+						<span x-text="c.detail"></span>
+						<div class="hint" x-show="c.status !== 'ok' && c.hint" x-text="hintText(c)"></div>
+					</td>
+				</tr>
+			</template>
+		</table>
+
+		<div x-show="missingModules.length" x-cloak>
+			<h2>Fix on the Proxmox host</h2>
+			<label>Container ID <input x-model="ctidValue" size="6" placeholder="CTID" @input="saveCtid()"></label>
+			<p>Run this on the Proxmox host as root. It loads the modules now and on every boot, then restarts this container:</p>
+			<pre class="code" x-text="hostCommands()"></pre>
+			<button @click="copy(hostCommands())">Copy</button>
+		</div>
+		<div class="actions"><button :disabled="busy" @click="refresh()">Run checks again</button></div>
+	</section>
+</main>
+</body>
+</html>
