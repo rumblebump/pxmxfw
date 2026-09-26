@@ -191,6 +191,60 @@
 		<div class="actions"><button class="primary" :disabled="busy" @click="saveApply()">Save and apply</button></div>
 	</section>
 
+	<!-- WireGuard -->
+	<section x-show="tab === 'wireguard'">
+		<h2>WireGuard tunnels</h2>
+		<p class="muted">
+			Each tunnel is an interface with a role, like a NIC. With role <b>lan</b>, the networks behind its peers and your other lans reach each other,
+			which is how you join Proxmox nodes or sites. Peers' allowed networks are routed into the tunnel (never a default route).
+		</p>
+		<template x-for="(t, ti) in tunnels" :key="t.name">
+			<div class="tunnel">
+				<div class="tunnel-head">
+					<h3 x-text="t.name"></h3>
+					<span class="badge" :class="wgState(t) === 'up' ? 'ok' : 'warn'" x-text="wgState(t)"></span>
+					<button class="link" @click="removeTunnel(ti)">Remove tunnel</button>
+				</div>
+				<div class="form">
+					<label>Listen port <input type="number" min="1" max="65535" x-model="t.port"></label>
+					<label>Tunnel address <input x-model="ifaceOf(t.name).addr" @input="ifaceOf(t.name).addrMode = 'static'" placeholder="10.99.0.1/24"></label>
+					<label>Role
+						<select x-model="ifaceOf(t.name).role"><option>lan</option><option>isolated</option><option>off</option></select>
+					</label>
+					<label>Public endpoint (how peers reach this firewall) <input x-model="t.public" placeholder="fw1.example.com:51820"></label>
+				</div>
+				<p>
+					<span class="muted">Public key:</span>
+					<code x-text="wgPub(t) || 'created when you save and apply'"></code>
+					<button class="link" x-show="wgPub(t)" @click="copy(wgPub(t))">Copy</button>
+				</p>
+				<table>
+					<tr><th>Name</th><th>Public key</th><th>Allowed IPs</th><th>Endpoint</th><th>Keepalive</th><th>Handshake</th><th></th></tr>
+					<template x-for="(p, pi) in t.peers" :key="pi">
+						<tr>
+							<td><input x-model="p.name" size="10"></td>
+							<td><input x-model="p.key" placeholder="their public key"></td>
+							<td><input x-model="p.allowed" placeholder="10.99.0.2/32, 192.168.20.0/24"></td>
+							<td><input x-model="p.endpoint" placeholder="optional host:port"></td>
+							<td><input x-model="p.keepalive" size="3" placeholder="25"></td>
+							<td class="muted" x-text="handshake(t, p)"></td>
+							<td><button class="link" @click="t.peers.splice(pi, 1)">Remove</button></td>
+						</tr>
+					</template>
+				</table>
+				<button @click="t.peers.push({ name: '', key: '', allowed: '', endpoint: '', keepalive: '25' })">Add peer</button>
+				<button :disabled="busy" @click="newPeer(t)">New peer with generated keys</button>
+				<div x-show="t.export" x-cloak>
+					<p>Config for the new peer (for wg-quick, or the WireGuard app). Its private key is not stored here, so copy it now:</p>
+					<pre class="code" x-text="t.export"></pre>
+					<button @click="copy(t.export)">Copy</button>
+				</div>
+			</div>
+		</template>
+		<button @click="addTunnel()">Add tunnel</button>
+		<div class="actions"><button class="primary" :disabled="busy" @click="saveApply()">Save and apply</button></div>
+	</section>
+
 	<!-- Checks -->
 	<section x-show="tab === 'checks'">
 		<h2>System checks</h2>

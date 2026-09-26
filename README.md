@@ -33,8 +33,8 @@ Or as root on an x86_64 Linux host with internet access (a Proxmox node works):
 ```
 
 This downloads the Alpine minirootfs (checksum verified), installs
-`alpine-base`, `nftables`, `dnsmasq` and `busybox-extras` (for the web UI's
-httpd), adds [Alpine.js](https://alpinejs.dev) (pinned by checksum), applies
+`alpine-base`, `nftables`, `dnsmasq`, `busybox-extras` (for the web UI's
+httpd) and `wireguard-tools-wg`, adds [Alpine.js](https://alpinejs.dev) (pinned by checksum), applies
 the files under `rootfs/`, enables the services and writes
 `out/alpine-<version>-pxmxfw-<date>_amd64.tar.gz`. Run `./build.sh -h` for
 options (Alpine version, mirror, output dir, local minirootfs).
@@ -101,6 +101,30 @@ not send across sites without a CORS preflight, and the UI never answers
 one). The login is HTTP basic auth over plain HTTP, so use it from the LAN
 only.
 
+## WireGuard
+
+Tunnels are interfaces with the same roles as NICs, so a tunnel with role
+`lan` joins the networks behind its peers with your other lans. That is how
+you connect Proxmox nodes, sites or external machines. On the WireGuard page:
+
+1. **Add tunnel** creates `wg0` with a port and a tunnel address
+   (10.99.0.1/24 by default). Fill in the public endpoint (the host and port
+   peers connect to), then save and apply. The tunnel's key pair is created
+   then and its public key is shown.
+2. **Another pxmxfw** (e.g. on another Proxmox node): add a tunnel there
+   too, then on each side add the other as a peer with its public key,
+   allowed IPs (its tunnel address as /32 plus the LANs behind it) and
+   endpoint. Open the WAN port for it where the other side has a firewall
+   in front.
+3. **An external machine**: **New peer with generated keys** adds a peer
+   and shows a ready config (for `wg-quick` or the WireGuard app) with a
+   free tunnel address. Its private key is not stored, so copy it then.
+
+Routes for each peer's allowed IPs point into the tunnel; a `/0` is never
+routed, so a peer cannot take over the default route. The tunnel's UDP port
+is opened automatically. The container needs the `wireguard` module on the
+Proxmox host: the Checks page shows the command.
+
 ## Configuration
 
 Everything lives in small text files in `/etc/pxmxfw`. The web UI edits the
@@ -114,6 +138,8 @@ dnsmasq config. Nothing else needs editing.
 | `services` | `tcp\|udp PORT[-PORT]`: open on WAN to the firewall itself |
 | `forwards` | `tcp\|udp WANPORT LANIP LANPORT`: port forwards |
 | `hosts` | `IP NAME [MAC]`: local DNS names, fixed DHCP leases with a MAC |
+| `wireguard` | `tunnel NAME port=PORT [public=HOST:PORT]` then `peer NAME key=PUBKEY allowed=CIDR[,CIDR] [endpoint=HOST:PORT] [keepalive=S]` |
+| `wg/NAME.key` | a tunnel's private key, created on the first apply |
 
 Roles: `lan` reaches the WAN and every other `lan`; `isolated` reaches the
 WAN only; `off` drops everything. With `IPV6=no` (the default) only IPv4 is

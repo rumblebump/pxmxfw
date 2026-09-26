@@ -20,7 +20,7 @@ ALPINE_MIRROR=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
 ARCH=x86_64
 OUTDIR=./out
 MINIROOTFS=
-PACKAGES="alpine-base nftables dnsmasq busybox-extras"
+PACKAGES="alpine-base nftables dnsmasq busybox-extras wireguard-tools-wg"
 PODMAN=
 
 # Alpine.js for the web UI, pinned by checksum

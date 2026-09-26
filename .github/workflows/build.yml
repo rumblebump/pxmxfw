@@ -17,7 +17,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install test tools
-        run: sudo apt-get update && sudo apt-get install -y busybox dnsmasq-base nftables shellcheck
+        run: sudo apt-get update && sudo apt-get install -y busybox dnsmasq-base nftables shellcheck wireguard-tools
+
+      # Lets the tests bring up a real tunnel in a network namespace
+      - name: Load the wireguard module
+        run: sudo modprobe wireguard || true
 
       - name: Shellcheck
         run: |

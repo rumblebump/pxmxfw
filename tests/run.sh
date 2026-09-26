@@ -235,6 +235,96 @@ if [ -n "$NFT" ]; then
 		ok || bad "apply: IPv4 forwarding on, IPv6 off"
 fi
 
+# ---- WireGuard ------------------------------------------------------------------
+
+K1=aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Qga2V5MTE=
+K2=YW5vdGhlciB0ZXN0IGtleSBmb3IgcGVlciB0d28gMTI=
+expect_valid wireguard "tunnel wg0 port=51820"
+expect_valid wireguard "$(printf 'tunnel wg0 port=51820 public=fw.example.com:51820\npeer wg0 key=%s allowed=10.99.0.2/32,192.168.20.0/24 endpoint=203.0.113.9:51820 keepalive=25 # site2' "$K1")"
+expect_valid wireguard "$(printf 'tunnel wg0 port=51820\npeer wg0 key=%s allowed=0.0.0.0/0,fd00::/64 endpoint=[2001:db8::1]:51820' "$K1")"
+expect_invalid wireguard "tunnel wg0"
+expect_invalid wireguard "tunnel wg0 port=0"
+expect_invalid wireguard "$(printf 'tunnel wg0 port=51820\ntunnel wg1 port=51820')"
+expect_invalid wireguard "peer wg0 key=$K1 allowed=10.0.0.0/8"                       # no tunnel line
+expect_invalid wireguard "$(printf 'tunnel wg0 port=51820\npeer wg0 key=notakey allowed=10.0.0.0/8')"
+expect_invalid wireguard "$(printf 'tunnel wg0 port=51820\npeer wg0 key=%s' "$K1")"   # no allowed
+expect_invalid wireguard "$(printf 'tunnel wg0 port=51820\npeer wg0 key=%s allowed=10.0.0.0/33' "$K1")"
+expect_invalid wireguard "$(printf 'tunnel wg0 port=51820\npeer wg0 key=%s allowed=10.0.0.0/8 endpoint=host' "$K1")"
+expect_invalid wireguard "$(printf 'tunnel wg0 port=51820\npeer wg0 key=%s allowed=10.0.0.0/8;reboot' "$K1")"
+
+fresh_etc "$T/etc"
+printf 'tunnel wg0 port=51820\npeer wg0 key=%s allowed=10.99.0.2/32,192.168.20.0/24 # site2\n' "$K1" > "$T/etc/wireguard"
+PXMXFW_ETC=$T/etc "$PXMXFW" render nft > /dev/null 2>&1 && bad "tunnel without an interfaces line accepted" || ok
+printf 'wg0 role=lan addr=10.99.0.1/24\n' >> "$T/etc/interfaces"
+check_ruleset wireguard
+grep -q 'udp dport { 51820 } accept comment "wireguard"' "$T/wireguard.nft" && ok || bad "wireguard port open"
+grep -q 'iifname { "eth1", "wg0" } oifname { "eth1", "wg0" }' "$T/wireguard.nft" && ok || bad "tunnel with role lan links the lans"
+
+# apply with fake ip and wg that log what they are asked to do
+cat > "$T/ipbin/wg" <<EOF
+#!/bin/sh
+echo "wg \$*" >> "$T/wg.log"
+case "\$1" in
+	genkey) echo "$K2" ;;
+	pubkey) cat > /dev/null; echo "$K1" ;;
+	syncconf) cp "\$3" "$T/wg-\$2.conf" ;;
+	show) [ "\$2" = interfaces ] && echo "wg0 wg9" ;;
+esac
+EOF
+chmod +x "$T/ipbin/wg"
+cat > "$T/ipbin/ip" <<EOF
+#!/bin/sh
+echo "ip \$*" >> "$T/ip.log"
+case "\$*" in
+	"-4 route show dev wg0") printf '10.99.0.0/24 proto kernel scope link src 10.99.0.1\n10.99.0.2 scope link\n172.16.0.0/16 scope link\n' ;;
+esac
+exit 0
+EOF
+: > "$T/ip.log"; : > "$T/wg.log"
+mkdir -p "$T/sys/wg0"
+if [ -n "$NFT" ]; then
+	printf 'flush ruleset\ninclude "%s"\n' "$T/etc/ruleset.nft" > "$T/main.nft"
+	cp "$T/wireguard.nft" "$T/etc/ruleset.nft"
+	unshare -n sh -c "$apply_env '$PXMXFW' apply" > "$T/out" 2>&1 && ok || bad "apply with a tunnel: $(cat "$T/out")"
+fi
+if [ -n "$NFT" ]; then
+	[ "$(cat "$T/etc/wg/wg0.key" 2>/dev/null)" = "$K2" ] && ok || bad "apply creates the tunnel's private key"
+	[ "$(stat -c %a "$T/etc/wg/wg0.key" 2>/dev/null)" = 600 ] && ok || bad "private key is mode 600"
+	grep -q "^PrivateKey = $K2" "$T/wg-wg0.conf" && grep -q '^ListenPort = 51820' "$T/wg-wg0.conf" &&
+		grep -q "^PublicKey = $K1" "$T/wg-wg0.conf" && grep -q '^AllowedIPs = 10.99.0.2/32,192.168.20.0/24' "$T/wg-wg0.conf" &&
+		ok || bad "wg syncconf gets the tunnel config: $(cat "$T/wg-wg0.conf" 2>&1)"
+	grep -qx 'ip -4 route replace 192.168.20.0/24 dev wg0' "$T/ip.log" && ok || bad "route to the peer's LAN: $(cat "$T/ip.log")"
+	grep -qx 'ip -4 route del 172.16.0.0/16 dev wg0' "$T/ip.log" && ok || bad "stale route removed"
+	grep -q 'route del 10.99.0.2 ' "$T/ip.log" && bad "wanted host route removed" || ok
+	grep -q 'route del 10.99.0.0/24' "$T/ip.log" && bad "kernel route removed" || ok
+	grep -qx 'ip link del dev wg9' "$T/ip.log" && ok || bad "unconfigured tunnel removed"
+	grep -qx 'ip -4 addr add 10.99.0.1/24 dev wg0' "$T/ip.log" && ok || bad "tunnel address set"
+	sed -i 's|^peer.*|peer wg0 key='"$K1"' allowed=0.0.0.0/0|' "$T/etc/wireguard"
+	: > "$T/ip.log"
+	unshare -n sh -c "$apply_env '$PXMXFW' apply" > /dev/null 2>&1
+	grep -q 'route replace 0.0.0.0/0' "$T/ip.log" && bad "a peer took over the default route" || ok
+fi
+env PATH="$T/ipbin:$PATH" PXMXFW_ETC="$T/etc" PXMXFW_SYSNET="$T/sys" PXMXFW_PROCSYS="$T/procsys" "$PXMXFW" wg-keypair > "$T/out"
+grep -qx "private=$K2" "$T/out" && grep -qx "public=$K1" "$T/out" && ok || bad "wg-keypair: $(cat "$T/out")"
+env PATH="$T/ipbin:$PATH" PXMXFW_ETC="$T/etc" PXMXFW_SYSNET="$T/sys" PXMXFW_PROCSYS="$T/procsys" "$PXMXFW" status > "$T/out" 2>&1
+grep -q "^wg=wg0 .* 51820 present" "$T/out" && ok || bad "status lists the tunnel: $(cat "$T/out")"
+grep -q "$K2" "$T/out" && bad "status leaks the private key" || ok
+
+# A real tunnel, when this kernel and system can make one (e.g. in CI)
+if [ -n "$NFT" ] && command -v wg >/dev/null && [ "$(command -v wg)" != "$T/ipbin/wg" ] &&
+	unshare -n sh -c 'ip link add dev wgtest type wireguard' 2>/dev/null; then
+	fresh_etc "$T/etc"
+	printf 'tunnel wg0 port=51820\npeer wg0 key=%s allowed=10.99.0.2/32,192.168.20.0/24 # site2\n' "$(wg genkey | wg pubkey)" > "$T/etc/wireguard"
+	printf 'eth0 role=wan\nwg0 role=lan addr=10.99.0.1/24\n' > "$T/etc/interfaces"
+	PXMXFW_ETC=$T/etc "$PXMXFW" render nft > "$T/etc/ruleset.nft"
+	if unshare -n sh -c "PXMXFW_ETC='$T/etc' PXMXFW_PROCSYS='$T/procsys' PXMXFW_NFT_MAIN='$T/main.nft' PXMXFW_DNSMASQ_CONF='$T/dnsmasq.conf' '$PXMXFW' apply >/dev/null &&
+		wg show wg0 && ip -4 addr show dev wg0 && ip -4 route show dev wg0" > "$T/out" 2>&1 &&
+		grep -q 'listening port: 51820' "$T/out" && grep -q '10.99.0.1/24' "$T/out" && grep -q '192.168.20.0/24' "$T/out"; then ok
+	else bad "real WireGuard tunnel: $(cat "$T/out")"; fi
+else
+	echo "note: cannot create WireGuard interfaces here, skipping the real tunnel test"
+fi
+
 # ---- checks -------------------------------------------------------------------
 
 # A fake nft whose NAT support is missing, as on a host without nft_masq
