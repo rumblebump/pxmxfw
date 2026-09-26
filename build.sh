@@ -130,7 +130,6 @@ grep -q '^conf-dir=/etc/dnsmasq.d' "$ROOT/etc/dnsmasq.conf" ||
 PXMXFW_ETC=$ROOT/etc/pxmxfw PXMXFW_LIB=$ROOT/usr/lib/pxmxfw \
 	sh "$ROOT/usr/sbin/pxmxfw" render nft > "$ROOT/etc/pxmxfw/ruleset.nft"
 chown -R 0:0 "$ROOT/etc" "$ROOT/usr/lib/pxmxfw" "$ROOT/usr/share/pxmxfw" "$ROOT/usr/sbin/pxmxfw"
-chmod 600 "$ROOT/etc/pxmxfw/httpd.conf"
 
 # OpenRC in a container: skip hardware-only services
 if [ -f "$ROOT/etc/rc.conf" ]; then

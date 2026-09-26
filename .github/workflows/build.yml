@@ -55,8 +55,10 @@ jobs:
         run: |
           # The UI logs in with the container's root password
           echo 'root:ci-test-pw' | sudo chroot /tmp/fw chpasswd
+          # Same steps as /etc/init.d/pxmxfw-webui
+          sudo chroot /tmp/fw sh -c 'umask 077; pxmxfw webui-conf > /run/httpd.conf'
           sudo chroot /tmp/fw /bin/busybox-extras httpd -p 127.0.0.1:8081 \
-            -h /usr/share/pxmxfw/www -c /etc/pxmxfw/httpd.conf
+            -h /usr/share/pxmxfw/www -c /run/httpd.conf
           sleep 1
           url='http://127.0.0.1:8081/cgi-bin/api?action=file&name=settings'
           test "$(curl -s -o /dev/null -w '%{http_code}' "$url")" = 401

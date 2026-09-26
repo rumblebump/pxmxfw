@@ -14,7 +14,9 @@ depend() {
 start_pre() {
 	listen=$(/usr/sbin/pxmxfw webui-listen) || return 1
 	mkdir -p /run/pxmxfw
+	# Login uses the root password; changes to it apply on the next restart
+	(umask 077; /usr/sbin/pxmxfw webui-conf > /run/pxmxfw/httpd.conf) || return 1
 	echo "$listen" > /run/pxmxfw/webui.listen
-	command_args="httpd -f -p $listen -h /usr/share/pxmxfw/www -c /etc/pxmxfw/httpd.conf"
+	command_args="httpd -f -p $listen -h /usr/share/pxmxfw/www -c /run/pxmxfw/httpd.conf"
 	einfo "Web UI on $listen"
 }

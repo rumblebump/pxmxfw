@@ -379,6 +379,22 @@ cmd_webui_listen() {
 	echo "127.0.0.1:$WEBUI_PORT"
 }
 
+# httpd config for the web UI: log in as root with the root password.
+# busybox httpd on Alpine cannot read /etc/shadow itself (built without
+# shadow support), so the root password hash is copied in when the UI
+# starts. A plaintext entry would be compared as plaintext, so without a
+# real hash this refuses rather than write one.
+cmd_webui_conf() {
+	hash=$(awk -F: '$1 == "root" { print $2; exit }' "${PXMXFW_SHADOW:-/etc/shadow}")
+	case $hash in
+		'$'[0-9]*'$'*) ;;
+		*) die "root has no password, so the web UI cannot log anyone in. Set one with: passwd (or in Proxmox)" ;;
+	esac
+	case $hash in *:*|*"
+"*) die "unexpected root password hash" ;; esac
+	printf '/:root:%s\n' "$hash"
+}
+
 case ${1:-help} in
 	apply) cmd_apply ;;
 	boot) cmd_boot ;;
@@ -389,6 +405,7 @@ case ${1:-help} in
 	validate) [ $# -eq 3 ] || die "usage: pxmxfw validate KIND FILE"; validate "$2" "$3" ;;
 	firstboot) cmd_firstboot ;;
 	webui-listen) cmd_webui_listen ;;
+	webui-conf) cmd_webui_conf ;;
 	help|-h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
 	*) die "unknown command: $1 (try: pxmxfw help)" ;;
 esac

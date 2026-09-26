@@ -275,5 +275,17 @@ grep -qx 'tcp 22 # ssh' "$T/etc/services" && ok || bad "invalid save leaves the 
 find "$T/etc" -name '*.new.*' | grep -q . && bad "cgi leaves temp files" || ok
 cgi DELETE 'action=status' | head -n1 | grep -q '^Status: 405' && ok || bad "cgi rejects other methods"
 
+# ---- web UI login ---------------------------------------------------------------
+
+printf 'root:$6$salt$abcdefghijklmnopqrstuvwxyz:19000:0:::::\n' > "$T/shadow"
+PXMXFW_SHADOW=$T/shadow "$PXMXFW" webui-conf > "$T/out" 2>&1 &&
+	grep -qx '/:root:$6$salt$abcdefghijklmnopqrstuvwxyz' "$T/out" && ok || bad "webui-conf copies the root hash: $(cat "$T/out")"
+for locked in '*' '!' '' 'plaintext'; do
+	printf 'root:%s:19000:0:::::\n' "$locked" > "$T/shadow"
+	PXMXFW_SHADOW=$T/shadow "$PXMXFW" webui-conf > "$T/out" 2>/dev/null &&
+		bad "webui-conf accepts root password field '$locked'" || ok
+	[ -s "$T/out" ] && bad "webui-conf printed a config for '$locked'" || ok
+done
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

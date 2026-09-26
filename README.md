@@ -94,7 +94,8 @@ Open `http://<LAN address>:8080` and log in as `root`. It has:
   `modprobe` and `/etc/modules-load.d` commands to run on the Proxmox host.
 
 The UI is served by busybox httpd and runs as root, since it changes the
-firewall. It only listens on the LAN address, and it refuses changes from
+firewall. It copies the root password hash into its config when it starts,
+so after changing the password run `rc-service pxmxfw-webui restart`. It only listens on the LAN address, and it refuses changes from
 other web pages (every change needs an `X-Pxmxfw` header, which browsers do
 not send across sites without a CORS preflight, and the UI never answers
 one). The login is HTTP basic auth over plain HTTP, so use it from the LAN
