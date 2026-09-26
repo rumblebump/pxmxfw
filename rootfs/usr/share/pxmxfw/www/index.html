@@ -97,11 +97,13 @@
 			The WAN (eth0) gets its address from Proxmox. NICs you add to the container in Proxmox show up here switched off; give them a role to use them.
 			Interfaces you add here start as <b>lan</b>.
 			<b>lan</b> reaches WAN and the other lans, <b>isolated</b> reaches WAN only, <b>off</b> drops everything.
-			<b>Allows</b> is what an interface may reach on the firewall itself.
+			<b>Allows</b> is what an interface may reach on the firewall itself. <b>DHCP &amp; DNS</b> sets the address range, lease time,
+			DNS servers and fixed addresses of a lan or isolated interface.
 		</p>
-		<table>
-			<tr><th>Interface</th><th>Role</th><th>IPv4</th><th x-show="ipv6()">IPv6</th><th>DHCP range</th><th>Allows</th><th>Comment</th><th></th></tr>
+		<table class="ifaces">
+			<thead><tr><th>Interface</th><th>Role</th><th>IPv4</th><th x-show="ipv6()">IPv6</th><th>DHCP</th><th>Allows</th><th>Comment</th><th></th></tr></thead>
 			<template x-for="r in ifaces" :key="r.name">
+				<tbody>
 				<tr>
 					<td>
 						<b x-text="r.name"></b>
@@ -129,9 +131,9 @@
 						</div>
 					</td>
 					<td>
-						<div x-show="r.role === 'lan' || r.role === 'isolated'" class="addr">
-							<input x-model="r.dhcpStart" placeholder="start" size="13">
-							<input x-model="r.dhcpEnd" placeholder="end" size="13">
+						<div x-show="inside(r)">
+							<span x-text="dhcpSummary(r)"></span>
+							<div><button class="link" @click="r.open = !r.open" x-text="r.open ? 'Hide' : 'DHCP & DNS'"></button></div>
 						</div>
 					</td>
 					<td>
@@ -144,9 +146,50 @@
 					<td><input x-model="r.comment"></td>
 					<td><button class="link" x-show="r.type" @click="removeIface(r)">Remove</button></td>
 				</tr>
+				<tr x-show="r.open && inside(r)" class="detail">
+					<td :colspan="ipv6() ? 8 : 7">
+						<div class="form">
+							<label class="check"><input type="checkbox" :checked="!!(r.dhcpStart || r.dhcpEnd)" @change="toggleDhcp(r, $event)"> Hand out addresses (DHCP)</label>
+						</div>
+						<div class="form" x-show="r.dhcpStart || r.dhcpEnd">
+							<label>First address <input x-model="r.dhcpStart" :placeholder="rangeHint(r, 100)"></label>
+							<label>Last address <input x-model="r.dhcpEnd" :placeholder="rangeHint(r, 200)"></label>
+							<label>Lease time <input x-model="r.lease" :placeholder="`${settings.DHCP_LEASE || '12h'} (default)`"></label>
+							<label>DNS servers handed out <input x-model="r.dns" placeholder="this firewall (default), or 1.1.1.1,9.9.9.9"></label>
+							<label>Gateway handed out
+								<select x-model="r.gwMode"><option value="">this firewall</option><option value="ip">another address</option><option value="none">none (no default route)</option></select>
+								<input x-show="r.gwMode === 'ip'" x-model="r.gateway" placeholder="10.20.1.254">
+							</label>
+						</div>
+						<h3>Fixed addresses and names in <span x-text="subnetOf(r) || 'this subnet'"></span></h3>
+						<p class="hint">A name resolves as name.<span x-text="settings.DNS_DOMAIN"></span>. With a MAC, DHCP always gives that machine this address.</p>
+						<table x-show="hostsIn(r).length">
+							<tr><th>Address</th><th>Name</th><th>MAC (optional)</th><th>Comment</th><th></th></tr>
+							<template x-for="h in hostsIn(r)" :key="h.id">
+								<tr>
+									<td><input x-model="h.ip"></td>
+									<td><input x-model="h.name"></td>
+									<td><input x-model="h.mac" placeholder="52:54:00:12:34:56"></td>
+									<td><input x-model="h.comment"></td>
+									<td><button class="link" @click="removeHost(h)">Remove</button></td>
+								</tr>
+							</template>
+						</table>
+						<button :disabled="!subnetOf(r)" @click="addHost(r)">Add fixed address</button>
+						<h3>Current leases</h3>
+						<table x-show="leasesIn(r).length">
+							<tr><th>Address</th><th>Name</th><th>MAC</th><th>Expires</th></tr>
+							<template x-for="l in leasesIn(r)" :key="l[2]">
+								<tr><td x-text="l[2]"></td><td x-text="l[3]"></td><td x-text="l[1]"></td><td x-text="l[0]"></td></tr>
+							</template>
+						</table>
+						<p class="hint" x-show="!leasesIn(r).length">No leases.</p>
+					</td>
+				</tr>
+				</tbody>
 			</template>
 		</table>
-		<p class="muted" x-show="!settings.DNSMASQ || settings.DNSMASQ === 'no'">DHCP ranges are used once dnsmasq is turned on under DNS &amp; DHCP. A DHCP range also allows DNS and DHCP.</p>
+		<p class="muted" x-show="!settings.DNSMASQ || settings.DNSMASQ === 'no'">DHCP is handed out once dnsmasq is turned on under DNS &amp; DHCP. A DHCP range also allows DNS and DHCP.</p>
 
 		<div class="actions" x-show="!adding"><button @click="startAdd()">Add interface</button></div>
 		<div class="form card" x-show="adding">
@@ -258,34 +301,28 @@
 			<label class="check"><input type="checkbox" :checked="settings.DNSMASQ === 'yes'" @change="yn('DNSMASQ', $event)"> Run dnsmasq on the LAN</label>
 			<label>Upstream DNS <input x-model="settings.DNS_UPSTREAM" placeholder="empty: use the servers Proxmox set"></label>
 			<label>Local domain <input x-model="settings.DNS_DOMAIN"></label>
-			<label>DHCP lease time <input x-model="settings.DHCP_LEASE" placeholder="12h"></label>
+			<label>Default DHCP lease time <input x-model="settings.DHCP_LEASE" placeholder="12h"></label>
 		</div>
-		<p class="muted">dnsmasq answers DNS on every lan and isolated interface, and hands out addresses where the interface has a DHCP range (see Interfaces).</p>
+		<p class="muted">
+			These settings apply to all interfaces. dnsmasq answers DNS on lan and isolated interfaces that allow it.
+			DHCP ranges, lease times, DNS servers handed out and fixed addresses are set per interface under
+			<a href="#" @click.prevent="tab = 'interfaces'">Interfaces</a> (DHCP &amp; DNS).
+		</p>
 
-		<h2>Hosts</h2>
-		<p class="muted">A name makes the address resolvable as name.<span x-text="settings.DNS_DOMAIN"></span>. With a MAC, DHCP always gives that machine this address.</p>
-		<table>
-			<tr><th>Address</th><th>Name</th><th>MAC (optional)</th><th>Comment</th><th></th></tr>
-			<template x-for="(r, i) in hosts" :key="i">
+		<h2>Other names</h2>
+		<p class="muted">Names for addresses outside your interfaces' subnets (for example behind a WireGuard peer), resolvable as name.<span x-text="settings.DNS_DOMAIN"></span>.</p>
+		<table x-show="otherHosts().length">
+			<tr><th>Address</th><th>Name</th><th>Comment</th><th></th></tr>
+			<template x-for="h in otherHosts()" :key="h.id">
 				<tr>
-					<td><input x-model="r.ip"></td>
-					<td><input x-model="r.name"></td>
-					<td><input x-model="r.mac" placeholder="52:54:00:12:34:56"></td>
-					<td><input x-model="r.comment"></td>
-					<td><button class="link" @click="hosts.splice(i, 1)">Remove</button></td>
+					<td><input x-model="h.ip"></td>
+					<td><input x-model="h.name"></td>
+					<td><input x-model="h.comment"></td>
+					<td><button class="link" @click="removeHost(h)">Remove</button></td>
 				</tr>
 			</template>
 		</table>
-		<button @click="hosts.push({ ip: '', name: '', mac: '', comment: '' })">Add host</button>
-
-		<h2>Current leases</h2>
-		<table x-show="leases.length">
-			<tr><th>Address</th><th>Name</th><th>MAC</th><th>Expires</th></tr>
-			<template x-for="l in leases" :key="l[2]">
-				<tr><td x-text="l[2]"></td><td x-text="l[3]"></td><td x-text="l[1]"></td><td x-text="l[0]"></td></tr>
-			</template>
-		</table>
-		<p class="muted" x-show="!leases.length">No leases.</p>
+		<button @click="addHost(null)">Add name</button>
 		<div class="actions"><button class="primary" :disabled="busy" @click="saveApply()">Save and apply</button></div>
 	</section>
 

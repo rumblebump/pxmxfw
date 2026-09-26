@@ -150,6 +150,14 @@ function network(cidr) {
 const SETTINGS_ORDER = ['NAT', 'WAN_PING', 'IPV6', 'WEBUI_PORT', 'WEBUI_WAN', 'DNSMASQ',
 	'DNS_UPSTREAM', 'DNS_DOMAIN', 'DHCP_LEASE'];
 
+let hostId = 1;
+const inNet = (ip, cidr) => {
+	if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip || '') || !cidr) return false;
+	const n = network(cidr);
+	const x = ip2n(ip);
+	return x >= n.base && x < n.base + n.size;
+};
+
 // What a lan or isolated interface may reach on the firewall itself
 const ALLOW = ['ping', 'ssh', 'dns', 'dhcp', 'webui'];
 
@@ -166,6 +174,10 @@ function parseIface(line) {
 		dhcpStart, dhcpEnd,
 		// without allow= everything is allowed (interfaces from the first boot)
 		allow: kv.allow === undefined ? [...ALLOW] : kv.allow === 'none' ? [] : kv.allow.split(','),
+		lease: kv.lease || '', dns: kv.dns || '',
+		gwMode: kv.gateway === undefined ? '' : kv.gateway === 'none' ? 'none' : 'ip',
+		gateway: kv.gateway && kv.gateway !== 'none' ? kv.gateway : '',
+		open: false,
 		type: kv.type || '', link: kv.link || '', vid: kv.vid || '', ports: kv.ports || '',
 	};
 }
@@ -174,8 +186,13 @@ function ifaceLine(r) {
 	if (r.role !== 'wan') {
 		if (r.addrMode !== 'proxmox') f.push(`addr=${r.addrMode === 'static' ? r.addr.trim() : 'none'}`);
 		if (r.addr6Mode !== 'proxmox') f.push(`addr6=${r.addr6Mode === 'static' ? r.addr6.trim() : 'none'}`);
-		if ((r.role === 'lan' || r.role === 'isolated') && (r.dhcpStart.trim() || r.dhcpEnd.trim()))
+		if ((r.role === 'lan' || r.role === 'isolated') && (r.dhcpStart.trim() || r.dhcpEnd.trim())) {
 			f.push(`dhcp=${r.dhcpStart.trim()}-${r.dhcpEnd.trim()}`);
+			if (r.lease.trim()) f.push(`lease=${r.lease.trim()}`);
+			if (r.dns.trim()) f.push(`dns=${r.dns.replace(/[\s,]+/g, ',').replace(/^,|,$/g, '')}`);
+			if (r.gwMode === 'none') f.push('gateway=none');
+			if (r.gwMode === 'ip' && r.gateway.trim()) f.push(`gateway=${r.gateway.trim()}`);
+		}
 		const allow = ALLOW.filter(a => r.allow.includes(a));
 		if (allow.length !== ALLOW.length) f.push(`allow=${allow.join(',') || 'none'}`);
 		if (r.type === 'vlan') f.push('type=vlan', `link=${r.link}`, `vid=${String(r.vid).trim()}`);
@@ -212,7 +229,8 @@ async function loadXterm() {
 function newIface(name, o = {}) {
 	return {
 		name, role: 'lan', comment: '', addrMode: 'none', addr: '', addr6Mode: 'none', addr6: '',
-		dhcpStart: '', dhcpEnd: '', allow: ['ping'], type: '', link: '', vid: '', ports: '', ...o,
+		dhcpStart: '', dhcpEnd: '', allow: ['ping'], type: '', link: '', vid: '', ports: '',
+		lease: '', dns: '', gwMode: '', gateway: '', open: false, ...o,
 	};
 }
 
@@ -509,7 +527,7 @@ document.addEventListener('alpine:init', () => {
 				}
 				this.services = lines(sv).map(parseRule).map(([[proto, port], comment]) => ({ proto, port, comment }));
 				this.forwards = lines(fw).map(parseRule).map(([[proto, wanport, lanip, lanport], comment]) => ({ proto, wanport, lanip, lanport, comment }));
-				this.hosts = lines(h).map(parseRule).map(([[ip, name, mac], comment]) => ({ ip, name, mac: mac || '', comment }));
+				this.hosts = lines(h).map(parseRule).map(([[ip, name, mac], comment]) => ({ id: hostId++, ip, name, mac: mac || '', comment }));
 			} catch (e) {
 				this.show('fail', `Could not load the configuration: ${e.message}`);
 			}
@@ -524,7 +542,7 @@ document.addEventListener('alpine:init', () => {
 				interfaces: ['# Network interfaces, see /usr/lib/pxmxfw/lib.sh for the format', ...this.ifaces.map(ifaceLine)].join('\n') + '\n',
 				services: ruleFile('# Open on WAN: tcp|udp PORT[-PORT] [# comment]', this.services, ['proto', 'port']),
 				forwards: ruleFile('# Port forwards: tcp|udp WANPORT LANIP LANPORT [# comment]', this.forwards, ['proto', 'wanport', 'lanip', 'lanport']),
-				hosts: ruleFile('# Hosts: IP NAME [MAC] [# comment]', this.hosts, ['ip', 'name', 'mac']),
+				hosts: ruleFile('# Hosts: IP NAME [MAC] [# comment]', this.hosts.filter(h => h.name.trim()), ['ip', 'name', 'mac']),
 			};
 		},
 
@@ -622,6 +640,49 @@ document.addEventListener('alpine:init', () => {
 			this.adding = null;
 			this.show('ok', `${r.name} added. Click Save and apply to create it.`);
 		},
+		// ---- per-interface DHCP and DNS ----
+		inside(r) { return r.role === 'lan' || r.role === 'isolated'; },
+		// the interface's IPv4 subnet: its static address, else what it has now
+		subnetOf(r) {
+			const c = r.addrMode === 'static' && /\/\d+$/.test(r.addr) ? r.addr
+				: (this.status.addrs.find(a => a[0] === r.name && !a[1].includes(':')) || [])[1];
+			if (!c) return '';
+			const n = network(c);
+			return `${n2ip(n.base)}/${n.prefix}`;
+		},
+		rangeHint(r, host) { const c = this.subnetOf(r); return c ? n2ip(network(c).base + host) : ''; },
+		dhcpSummary(r) {
+			if (!(r.dhcpStart || r.dhcpEnd)) return 'off';
+			const tail = ip => (ip || '').split('.').pop();
+			return `.${tail(r.dhcpStart)} to .${tail(r.dhcpEnd)}`;
+		},
+		toggleDhcp(r, ev) {
+			if (ev.target.checked) {
+				r.dhcpStart = this.rangeHint(r, 100); r.dhcpEnd = this.rangeHint(r, 200);
+				if (!r.dhcpStart) { ev.target.checked = false; this.show('warn', `Give ${r.name} an IPv4 address first.`); }
+			} else {
+				r.dhcpStart = r.dhcpEnd = '';
+			}
+		},
+		hostsIn(r) { const c = this.subnetOf(r); return c ? this.hosts.filter(h => inNet(h.ip, c)) : []; },
+		otherHosts() {
+			const nets = this.ifaces.filter(r => this.inside(r)).map(r => this.subnetOf(r)).filter(Boolean);
+			return this.hosts.filter(h => !nets.some(c => inNet(h.ip, c)));
+		},
+		leasesIn(r) { const c = this.subnetOf(r); return c ? this.leases.filter(l => inNet(l[2], c)) : []; },
+		addHost(r) {
+			const c = r && this.subnetOf(r);
+			// a new row starts in the subnet, so it shows up under this interface
+			let ip = '';
+			if (c) {
+				const n = network(c);
+				const used = new Set(this.hosts.map(h => h.ip));
+				for (let x = n.base + 10; x < n.base + n.size - 1 && !ip; x++) if (!used.has(n2ip(x))) ip = n2ip(x);
+			}
+			this.hosts.push({ id: hostId++, ip, name: '', mac: '', comment: '' });
+		},
+		removeHost(h) { this.hosts = this.hosts.filter(x => x !== h); },
+
 		removeIface(r) { this.ifaces = this.ifaces.filter(x => x !== r); },
 		toggleAllow(r, a, ev) {
 			r.allow = ev.target.checked ? [...new Set([...r.allow, a])] : r.allow.filter(x => x !== a);

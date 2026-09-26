@@ -73,3 +73,5 @@ td input[type=checkbox], .form input[type=checkbox] { width: auto; }
 .form h3 { margin: 0 0 8px; }
 .form.card > div > div { display: grid; gap: 8px; margin-bottom: 8px; }
 .term { margin-top: 12px; height: 60vh; min-height: 300px; background: #000; border-radius: 6px; padding: 4px; }
+table.ifaces tr.detail > td { background: var(--bg); padding: 12px; }
+table.ifaces tr.detail h3 { margin: 14px 0 4px; font-size: 14px; }
