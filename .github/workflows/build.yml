@@ -90,8 +90,9 @@ jobs:
           call -o /dev/null https://127.0.0.1:8443/alpine.min.js
           # packages: search and install a small one through the UI's API
           sudo cp -L /etc/resolv.conf /tmp/fw/etc/resolv.conf
-          call "$api?action=pkg-search&name=tree" | grep -q '^tree-'
-          call -X POST "$api?action=pkg-add&name=tree"
+          call "$api?action=pkg-search&name=tree" | tee search.out
+          grep -q '^tree-' search.out
+          call -X POST "$api?action=pkg-add&name=tree" || { cat webui.log; exit 1; }
           grep -qx tree /tmp/fw/etc/pxmxfw/packages
           test -x /tmp/fw/usr/bin/tree
           call "$api?action=pkgs" | grep -q '^tree [0-9]'

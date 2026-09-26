@@ -503,7 +503,8 @@ cmd_pkg_list() {
 
 cmd_pkg_search() {
 	is_pkgname "${1:-}" || die "search for a package name (a-z 0-9 + . _ -)"
-	"$APK" search --update-cache -v -- "$1" | head -n 100
+	_out=$("$APK" search --update-cache -v -- "$1") || die "apk search failed"
+	printf '%s\n' "$_out" | head -n 100
 }
 
 pkg_names() { # validate NAME... from the command line
