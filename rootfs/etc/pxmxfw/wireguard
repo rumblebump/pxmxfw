@@ -1,0 +1,7 @@
+# WireGuard tunnels. Each tunnel also needs a line in "interfaces" with its
+# role and tunnel address, e.g.: wg0 role=lan addr=10.99.0.1/24
+#   tunnel NAME port=PORT [public=HOST:PORT]      public: how peers reach this firewall
+#   peer NAME key=PUBLICKEY allowed=CIDR[,CIDR] [endpoint=HOST:PORT] [keepalive=25] [# name]
+# Example: link to another site whose LAN is 192.168.20.0/24
+# tunnel wg0 port=51820 public=fw1.example.com:51820
+# peer wg0 key=<their public key> allowed=10.99.0.2/32,192.168.20.0/24 endpoint=fw2.example.com:51820 keepalive=25 # site2

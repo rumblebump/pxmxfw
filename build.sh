@@ -20,7 +20,7 @@ ALPINE_MIRROR=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
 ARCH=x86_64
 OUTDIR=./out
 MINIROOTFS=
-PACKAGES="alpine-base nftables dnsmasq linux-pam sqlite-libs"
+PACKAGES="alpine-base nftables dnsmasq wireguard-tools-wg linux-pam sqlite-libs"
 # To build the web UI server (never installed into the template)
 BUILD_DEPS="go gcc musl-dev linux-pam-dev sqlite-dev"
 PODMAN=

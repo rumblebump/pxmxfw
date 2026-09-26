@@ -6,6 +6,7 @@
 #   services     "proto port [# comment]"            open on WAN to the firewall
 #   forwards     "proto wanport lanip lanport [# c]" port forwards to the LAN
 #   hosts        "ip name [mac] [# comment]"         DNS names / static DHCP leases
+#   wireguard    "tunnel NAME port=.." / "peer NAME key=.. allowed=.."  WireGuard
 #
 # Files are parsed line by line and every value is checked against a strict
 # pattern. Nothing is ever sourced or eval'd, because the web UI writes them.
@@ -257,11 +258,110 @@ rules_each() {
 	[ "$_errors" -eq 0 ]
 }
 
-# validate KIND FILE: KIND is settings, interfaces, services, forwards or hosts
+# ---- WireGuard --------------------------------------------------------------
+# $PXMXFW_ETC/wireguard, one tunnel line followed by its peer lines:
+#   tunnel NAME port=PORT [public=HOST:PORT] [# comment]
+#   peer NAME key=PUBLICKEY allowed=CIDR[,CIDR...] [endpoint=HOST:PORT] [keepalive=SECONDS] [# name]
+# NAME is the tunnel interface (e.g. wg0). It also needs a line in the
+# interfaces file, which sets its role and its tunnel address. The private
+# key is created on the first apply in $PXMXFW_ETC/wg/NAME.key.
+
+is_wgkey() { printf '%s\n' "$1" | grep -Eqx '[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]='; }
+is_host() { is_ipv4 "$1" || is_domain "$1"; }
+is_hostport() {
+	case $1 in
+		\[*\]:*) _h=${1%]:*}; _h=${_h#\[}; _pt=${1##*]:}
+			case $_h in *:*) ;; *) return 1 ;; esac
+			case $_h in *[!0-9A-Fa-f:]*) return 1 ;; esac ;;
+		*:*) _h=${1%:*}; _pt=${1##*:}; is_host "$_h" || return 1 ;;
+		*) return 1 ;;
+	esac
+	is_port "$_pt"
+}
+is_allowed_ip() { # IPv4 or IPv6 CIDR; /0 allowed
+	case $1 in */*) ;; *) return 1 ;; esac
+	_a=${1%/*} _p=${1#*/}
+	is_uint "$_p" || return 1
+	case $_a in
+		*:*) case $_a in *[!0-9A-Fa-f:]*) return 1 ;; esac; [ "$_p" -le 128 ] ;;
+		*) is_ipv4 "$_a" && [ "$_p" -le 32 ] ;;
+	esac
+}
+
+# wg_each FILE CALLBACK: validate the wireguard file and call
+#   CALLBACK tunnel NAME PORT PUBLIC COMMENT
+#   CALLBACK peer NAME KEY ALLOWED ENDPOINT KEEPALIVE COMMENT
+# With CALLBACK "-" only validates. Sets WG_TUNNELS and WG_PORTS.
+wg_each() {
+	_f=$1 _cb=$2
+	_errors=0
+	WG_TUNNELS='' WG_PORTS=''
+	[ -r "$_f" ] || return 0
+	_n=0
+	while IFS= read -r _line || [ -n "$_line" ]; do
+		_n=$((_n + 1))
+		_c=
+		case $_line in *'#'*) _c=$(_strip "${_line#*#}") ;; esac
+		_line=$(_strip "$_line")
+		[ -n "$_line" ] || continue
+		is_comment "$_c" || { err "$_f" "$_n" "comment may only use letters, digits, spaces and _.,:/+- (max 64)"; continue; }
+		# shellcheck disable=SC2086
+		set -- $_line
+		_kind=$1 _name=${2:-}
+		[ $# -ge 2 ] || { err "$_f" "$_n" "expected: tunnel NAME ... or peer NAME ..."; continue; }
+		shift 2
+		is_iface "$_name" || { err "$_f" "$_n" "invalid tunnel name"; continue; }
+		_bad=''
+		case $_kind in
+			tunnel)
+				_port='' _pub=''
+				for _kv; do
+					case $_kv in
+						port=*) is_port "${_kv#port=}" && _port=${_kv#port=} || _bad="port: 1-65535" ;;
+						public=*) is_hostport "${_kv#public=}" && _pub=${_kv#public=} || _bad="public: HOST:PORT" ;;
+						*) _bad="unknown field $_kv" ;;
+					esac
+				done
+				[ -n "$_port" ] || _bad=${_bad:-"needs port="}
+				case " $WG_TUNNELS " in *" $_name "*) _bad="tunnel $_name listed twice" ;; esac
+				case " $WG_PORTS " in *" $_port "*) [ -z "$_port" ] || _bad="port $_port used twice" ;; esac
+				[ -z "$_bad" ] || { err "$_f" "$_n" "$_name: $_bad"; continue; }
+				WG_TUNNELS="${WG_TUNNELS:+$WG_TUNNELS }$_name"
+				WG_PORTS="${WG_PORTS:+$WG_PORTS }$_port"
+				[ "$_cb" = - ] || "$_cb" tunnel "$_name" "$_port" "$_pub" "$_c" ;;
+			peer)
+				_key='' _allowed='' _ep='' _ka=''
+				for _kv; do
+					case $_kv in
+						key=*) is_wgkey "${_kv#key=}" && _key=${_kv#key=} || _bad="key: a WireGuard public key" ;;
+						allowed=*)
+							_allowed=${_kv#allowed=}
+							for _a in $(echo "$_allowed" | tr ',' ' '); do
+								is_allowed_ip "$_a" || _bad="allowed: comma separated IP/PREFIX"
+							done
+							[ -n "$_allowed" ] || _bad="allowed: comma separated IP/PREFIX" ;;
+						endpoint=*) is_hostport "${_kv#endpoint=}" && _ep=${_kv#endpoint=} || _bad="endpoint: HOST:PORT" ;;
+						keepalive=*) is_uint "${_kv#keepalive=}" && [ "${_kv#keepalive=}" -le 65535 ] && _ka=${_kv#keepalive=} || _bad="keepalive: seconds" ;;
+						*) _bad="unknown field $_kv" ;;
+					esac
+				done
+				[ -n "$_key" ] || _bad=${_bad:-"needs key="}
+				[ -n "$_allowed" ] || _bad=${_bad:-"needs allowed="}
+				case " $WG_TUNNELS " in *" $_name "*) ;; *) _bad="no tunnel line for $_name above this peer" ;; esac
+				[ -z "$_bad" ] || { err "$_f" "$_n" "peer: $_bad"; continue; }
+				[ "$_cb" = - ] || "$_cb" peer "$_name" "$_key" "$_allowed" "$_ep" "$_ka" "$_c" ;;
+			*) err "$_f" "$_n" "expected: tunnel NAME ... or peer NAME ..." ;;
+		esac
+	done < "$_f"
+	[ "$_errors" -eq 0 ]
+}
+
+# validate KIND FILE: KIND is settings, interfaces, services, forwards, hosts or wireguard
 validate() {
 	case $1 in
 		settings) settings_load "$2" ;;
 		interfaces) ifaces_each "$2" - ;;
+		wireguard) wg_each "$2" - ;;
 		services|forwards|hosts) rules_each "$1" "$2" - ;;
 		*) echo "unknown kind: $1" >&2; return 2 ;;
 	esac
@@ -274,7 +374,15 @@ config_load() {
 	for _k in services forwards hosts; do
 		rules_each "$_k" "$PXMXFW_ETC/$_k" - || _ok=1
 	done
+	wg_each "$PXMXFW_ETC/wireguard" - || _ok=1
 	ifaces_each "$PXMXFW_ETC/interfaces" - || _ok=1
+	for _t in $WG_TUNNELS; do
+		[ "$_t" != "$WAN_IF" ] || { echo "$PXMXFW_ETC/interfaces: tunnel $_t cannot be the wan" >&2; _ok=1; }
+		awk -v t="$_t" '$1 == t { f = 1 } END { exit !f }' "$PXMXFW_ETC/interfaces" 2>/dev/null || {
+			echo "$PXMXFW_ETC/interfaces: tunnel $_t needs a line, e.g. \"$_t role=lan addr=10.99.0.1/24\"" >&2
+			_ok=1
+		}
+	done
 	if [ "$DNSMASQ" = yes ] && [ -z "$IN_IFS" ]; then
 		echo "$PXMXFW_ETC/pxmxfw.conf: DNSMASQ needs an interface with role lan or isolated" >&2
 		_ok=1
@@ -327,6 +435,7 @@ render_nft() {
 	l 2 "iifname \"lo\" accept"
 	l 2 "meta l4proto ipv6-icmp accept"
 	l 2 "iifname \"$WAN_IF\" udp dport 546 accept comment \"DHCPv6 client\""
+	[ -z "$WG_PORTS" ] || l 2 "udp dport { $(echo "$WG_PORTS" | sed 's/ /, /g') } accept comment \"wireguard\""
 	if [ "$WAN_PING" = yes ]; then
 		l 2 "icmp type echo-request accept"
 	elif [ -n "$IN_IFS" ]; then

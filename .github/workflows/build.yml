@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install test tools
-        run: sudo apt-get update && sudo apt-get install -y busybox dnsmasq-base nftables shellcheck libpam0g-dev libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y busybox dnsmasq-base nftables shellcheck libpam0g-dev libsqlite3-dev wireguard-tools
 
       - uses: actions/setup-go@v5
         with:
@@ -30,6 +30,10 @@ jobs:
           test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
           go vet -tags libsqlite3 ./...
           go test -tags libsqlite3 ./...
+
+      # Lets the tests bring up a real tunnel in a network namespace
+      - name: Load the wireguard module
+        run: sudo modprobe wireguard || true
 
       - name: Shellcheck
         run: |

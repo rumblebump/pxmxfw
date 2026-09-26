@@ -10,6 +10,7 @@
 #   render nft|dnsmasq print the generated config without applying it
 #   validate KIND FILE check a config file (settings|interfaces|services|forwards|hosts)
 #   firstboot          one-time setup on the first container start
+#   wg-keypair         print a new WireGuard key pair (for a peer; not stored)
 #
 # Settings live in /etc/pxmxfw. The web UI edits the same files, so they can
 # also be managed with Ansible, Puppet or git: write them, then "pxmxfw apply".
@@ -24,6 +25,7 @@ RULESET=$PXMXFW_ETC/ruleset.nft
 IFACES=$PXMXFW_ETC/interfaces
 NFT_MAIN=${PXMXFW_NFT_MAIN:-/etc/nftables.nft}
 FIRSTBOOT_DONE=$PXMXFW_ETC/.firstboot-done
+WG_DIR=$PXMXFW_ETC/wg
 
 die() { echo "pxmxfw: $*" >&2; exit 1; }
 have_rc() { command -v rc-service >/dev/null 2>&1; }
@@ -70,7 +72,87 @@ _a_iface() { # name role addr addr6 dhcp comment
 	fi
 }
 
+# ---- WireGuard ------------------------------------------------------------
+# Tunnels are plain interfaces made with "ip link add type wireguard" and
+# configured with "wg syncconf", so peers not in the config are removed.
+# Routes for each peer's allowed IPs point into its tunnel (never a /0: a
+# peer never takes over the default route).
+
+_w_collect() { # tunnel NAME PORT PUBLIC COMMENT | peer NAME KEY ALLOWED ENDPOINT KEEPALIVE COMMENT
+	case $1 in
+		tunnel)
+			printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n' "$(cat "$WG_DIR/$2.key")" "$3" > "$wgtmp/$2.conf"
+			: > "$wgtmp/$2.routes" ;;
+		peer)
+			{
+				printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = %s\n' "$3" "$4"
+				[ -z "$5" ] || printf 'Endpoint = %s\n' "$5"
+				[ -z "$6" ] || printf 'PersistentKeepalive = %s\n' "$6"
+			} >> "$wgtmp/$2.conf"
+			echo "$4" | tr ',' '\n' >> "$wgtmp/$2.routes" ;;
+	esac
+}
+
+# wg_routes TUNNEL ROUTESFILE: routes for the peers' allowed IPs, and no others
+wg_routes() {
+	want=''
+	for r in $(cat "$2"); do
+		case $r in */0) continue ;; esac
+		case $r in *:*) [ "$IPV6" = yes ] || continue ;; esac
+		# "ip route show" prints host routes without /32 or /128
+		want="$want $r ${r%/32} ${r%/128}"
+	done
+	for fam in 4 6; do
+		ip -$fam route show dev "$1" 2>/dev/null | while read -r dst rest; do
+			case $rest in *"proto kernel"*) continue ;; esac
+			case " $want " in *" $dst "*) ;; *) ip -$fam route del "$dst" dev "$1" 2>/dev/null || true ;; esac
+		done
+	done
+	for r in $(cat "$2"); do
+		case $r in */0) continue ;; *:*) [ "$IPV6" = yes ] || continue; fam=6 ;; *) fam=4 ;; esac
+		ip -$fam route replace "$r" dev "$1" || echo "pxmxfw: could not route $r into $1" >&2
+	done
+}
+
+apply_wireguard() {
+	existing=$(wg show interfaces 2>/dev/null || true)
+	if [ -n "$WG_TUNNELS" ]; then
+		command -v wg >/dev/null 2>&1 || { echo "pxmxfw: wg is not installed (apk add wireguard-tools-wg)" >&2; return 0; }
+		(umask 077; mkdir -p "$WG_DIR")
+		for t in $WG_TUNNELS; do
+			[ -s "$WG_DIR/$t.key" ] || (umask 077; wg genkey > "$WG_DIR/$t.key")
+		done
+		wgtmp=$(mktemp -d)
+		chmod 700 "$wgtmp"
+		wg_each "$PXMXFW_ETC/wireguard" _w_collect
+		for t in $WG_TUNNELS; do
+			if [ ! -e "$PXMXFW_SYSNET/$t" ] && ! ip link add dev "$t" type wireguard 2>/dev/null; then
+				echo "pxmxfw: cannot create tunnel $t: load the wireguard module on the Proxmox host (see pxmxfw check)" >&2
+				continue
+			fi
+			wg syncconf "$t" "$wgtmp/$t.conf" || echo "pxmxfw: configuring $t failed" >&2
+			ip link set dev "$t" up 2>/dev/null || true
+			wg_routes "$t" "$wgtmp/$t.routes"
+		done
+		rm -rf "$wgtmp"
+	fi
+	for i in $existing; do
+		case " $WG_TUNNELS " in *" $i "*) ;; *) ip link del dev "$i" 2>/dev/null && echo "wireguard: removed $i" ;; esac
+	done
+	return 0
+}
+
+# Public key of a tunnel, from its private key file
+wg_pubkey() { [ -s "$WG_DIR/$1.key" ] && wg pubkey < "$WG_DIR/$1.key" 2>/dev/null; }
+
+cmd_wg_keypair() {
+	priv=$(wg genkey) || die "wg is not installed"
+	echo "private=$priv"
+	echo "public=$(printf '%s\n' "$priv" | wg pubkey)"
+}
+
 apply_system() {
+	apply_wireguard
 	ifaces_each "$IFACES" _a_iface
 	sysctl_set net/ipv4/ip_forward 1
 	if [ "$IPV6" = yes ]; then
@@ -242,6 +324,8 @@ _c_iface() { # name role addr addr6 dhcp comment
 		else
 			_check ok "if_$1" "Interface $1 ($2)" "present${a:+, $a}" ""
 		fi
+	elif case " $WG_TUNNELS " in *" $1 "*) true ;; *) false ;; esac; then
+		_check fail "if_$1" "Tunnel $1 ($2)" "not created" "See the WireGuard check above, then click Apply."
 	else
 		n=${1#eth}
 		case $n in *[!0-9]*|'') n=N ;; esac
@@ -270,8 +354,13 @@ cmd_check() {
 			'chain c { type nat hook prerouting priority dstnat; meta nfproto ipv4 tcp dport 1 dnat ip to 192.0.2.1:1; }'
 	fi
 
+	if [ -n "$WG_TUNNELS" ] && ! command -v wg >/dev/null 2>&1; then
+		_check fail wg "WireGuard tools" "wg not installed" "Run: apk add wireguard-tools-wg"
+	fi
 	if module_loaded wireguard; then
 		_check ok wireguard "WireGuard" "available (wireguard)" ""
+	elif [ -n "$WG_TUNNELS" ]; then
+		_check fail wireguard "WireGuard" "module not loaded, tunnels cannot start" "modules:wireguard"
 	else
 		_check warn wireguard "WireGuard" "module not loaded (only needed for tunnels)" "modules:wireguard"
 	fi
@@ -359,6 +448,14 @@ cmd_status() {
 	if [ -e "$FIRSTBOOT_DONE" ]; then echo firstboot=done; else echo firstboot=pending; fi
 	# iface=NAME ROLE present|missing PROXMOX_V4 PROXMOX_V6
 	ifaces_each "$IFACES" _s_iface 2>/dev/null || true
+	# wg=NAME PUBLICKEY PORT present|missing, then wgpeer=NAME KEY ENDPOINT HANDSHAKE RX TX
+	set -- $WG_PORTS
+	for t in $WG_TUNNELS; do
+		if [ -e "$PXMXFW_SYSNET/$t" ]; then st=present; else st=missing; fi
+		echo "wg=$t $(wg_pubkey "$t" || echo -) $1 $st"
+		shift
+	done
+	wg show all dump 2>/dev/null | awk -F '\t' 'NF == 9 { print "wgpeer=" $1 " " $2 " " $4 " " $6 " " $7 " " $8 }'
 	# addr=NAME ADDRESS/PREFIX for every address in the container
 	ip -o addr show 2>/dev/null | awk '$2 != "lo" && $4 !~ /^fe80:/ { print "addr=" $2 " " $4 }'
 }
@@ -389,6 +486,7 @@ case ${1:-help} in
 	validate) [ $# -eq 3 ] || die "usage: pxmxfw validate KIND FILE"; validate "$2" "$3" ;;
 	firstboot) cmd_firstboot ;;
 	webui-listen) cmd_webui_listen ;;
-	help|-h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+	wg-keypair) cmd_wg_keypair ;;
+	help|-h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
 	*) die "unknown command: $1 (try: pxmxfw help)" ;;
 esac
