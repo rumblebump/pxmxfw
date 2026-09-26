@@ -7,13 +7,10 @@
 # node works fine).
 #
 # Usage: ./build.sh [-v ALPINE_VERSION] [-m MIRROR] [-o OUTDIR] [-r MINIROOTFS]
-#                   [--skip-packages]
 #   -v  Alpine branch, e.g. 3.22 (default: $ALPINE_VERSION or 3.22)
 #   -m  Alpine mirror (default: $ALPINE_MIRROR or https://dl-cdn.alpinelinux.org/alpine)
 #   -o  output directory (default: ./out)
 #   -r  use a local minirootfs .tar.gz instead of downloading one
-#   --skip-packages  do not run apk; only useful for testing the packing
-#                    steps without network access to an Alpine mirror
 
 set -eu
 
@@ -22,7 +19,6 @@ ALPINE_MIRROR=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
 ARCH=x86_64
 OUTDIR=./out
 MINIROOTFS=
-SKIP_PACKAGES=0
 PACKAGES="alpine-base nftables dnsmasq"
 
 SRCDIR=$(cd "$(dirname "$0")" && pwd)
@@ -35,8 +31,7 @@ while [ $# -gt 0 ]; do
 		-m) ALPINE_MIRROR=$2; shift 2 ;;
 		-o) OUTDIR=$2; shift 2 ;;
 		-r) MINIROOTFS=$2; shift 2 ;;
-		--skip-packages) SKIP_PACKAGES=1; shift ;;
-		-h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) die "unknown option: $1" ;;
 	esac
 done
@@ -80,22 +75,20 @@ cat > "$ROOT/etc/apk/repositories" <<-EOF
 	$ALPINE_MIRROR/v$ALPINE_VERSION/main
 	$ALPINE_MIRROR/v$ALPINE_VERSION/community
 EOF
-if [ "$SKIP_PACKAGES" -eq 0 ]; then
-	echo ">> Installing: $PACKAGES"
-	cp -L /etc/resolv.conf "$ROOT/etc/resolv.conf"
-	mount -t proc proc "$ROOT/proc"
-	mount --bind /dev "$ROOT/dev"
-	chroot "$ROOT" /sbin/apk add --no-cache --update $PACKAGES
-	umount "$ROOT/dev" "$ROOT/proc"
-	: > "$ROOT/etc/resolv.conf"   # Proxmox writes this on container start
-else
-	echo ">> Skipping package install (--skip-packages): template will NOT boot a firewall"
-fi
+echo ">> Installing: $PACKAGES"
+cp -L /etc/resolv.conf "$ROOT/etc/resolv.conf"
+mount -t proc proc "$ROOT/proc"
+mount --bind /dev "$ROOT/dev"
+chroot "$ROOT" /sbin/apk add --no-cache --update $PACKAGES
+umount "$ROOT/dev" "$ROOT/proc"
+: > "$ROOT/etc/resolv.conf"   # Proxmox writes this on container start
 
 # 3. Apply the project's config
 echo ">> Applying rootfs/ overlay"
 cp -a "$SRCDIR/rootfs/." "$ROOT/"
 mkdir -p "$ROOT/etc/nftables.d"
+grep -q '^conf-dir=/etc/dnsmasq.d' "$ROOT/etc/dnsmasq.conf" ||
+	echo 'conf-dir=/etc/dnsmasq.d/,*.conf' >> "$ROOT/etc/dnsmasq.conf"
 chown -R 0:0 "$ROOT/etc"
 
 # OpenRC in a container: skip hardware-only services
@@ -105,8 +98,7 @@ else
 	echo 'rc_sys="lxc"' > "$ROOT/etc/rc.conf"
 fi
 
-# 4. Enable services (same effect as rc-update add, done by symlink so it
-#    also works with --skip-packages)
+# 4. Enable services (same effect as rc-update add)
 enable() { # runlevel service...
 	lvl=$1; shift
 	mkdir -p "$ROOT/etc/runlevels/$lvl"
@@ -118,9 +110,7 @@ enable shutdown killprocs savecache
 
 # 5. Pack the template
 DATE=$(date +%Y%m%d)
-SUFFIX=
-[ "$SKIP_PACKAGES" -eq 1 ] && SUFFIX=-nopkgs
-OUT=$OUTDIR/alpine-$RELEASE-pxmxfw$SUFFIX-${DATE}_amd64.tar.gz
+OUT=$OUTDIR/alpine-$RELEASE-pxmxfw-${DATE}_amd64.tar.gz
 echo ">> Packing $OUT"
 rm -rf "$ROOT/var/cache/apk/"* "$ROOT/tmp/"*
 tar --numeric-owner -czf "$OUT" -C "$ROOT" .

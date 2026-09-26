@@ -19,6 +19,10 @@ enables the services and writes
 `out/alpine-<version>-pxmxfw-<date>_amd64.tar.gz`. Run `./build.sh -h` for
 options (Alpine version, mirror, output dir, local minirootfs).
 
+GitHub Actions runs the same build on every push and pull request and
+uploads the tarball as a workflow artifact. Pushing a `v*` tag also
+attaches it to a GitHub release.
+
 ## Create the container
 
 ```sh

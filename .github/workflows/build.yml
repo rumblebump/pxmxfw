@@ -1,0 +1,40 @@
+name: Build template
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build template
+        run: sudo ./build.sh -o out
+
+      - name: Check config inside the template
+        run: |
+          sudo mkdir /tmp/fw
+          sudo tar -xzf out/*.tar.gz -C /tmp/fw
+          sudo chroot /tmp/fw nft -c -f /etc/nftables.nft
+          sudo chroot /tmp/fw dnsmasq --test
+          ls -l out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pxmxfw-template
+          path: out/*.tar.gz
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" out/*.tar.gz --generate-notes
