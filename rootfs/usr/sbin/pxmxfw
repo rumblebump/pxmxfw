@@ -503,7 +503,7 @@ cmd_pkg_list() {
 
 cmd_pkg_search() {
 	is_pkgname "${1:-}" || die "search for a package name (a-z 0-9 + . _ -)"
-	"$APK" search -v -- "$1" | head -n 100
+	"$APK" search --update-cache -v -- "$1" | head -n 100
 }
 
 pkg_names() { # validate NAME... from the command line
@@ -513,7 +513,7 @@ pkg_names() { # validate NAME... from the command line
 
 cmd_pkg_add() {
 	pkg_names "$@"
-	"$APK" add -- "$@" || die "apk add failed"
+	"$APK" add --update-cache -- "$@" || die "apk add failed"
 	touch "$PKGS"
 	for p in "$@"; do
 		pkgs_listed | grep -qxF -- "$p" || echo "$p" >> "$PKGS"
@@ -538,7 +538,7 @@ cmd_pkg_sync() {
 	# shellcheck disable=SC2046
 	set -- $(pkgs_listed)
 	[ $# -gt 0 ] || { echo "no extra packages listed"; return 0; }
-	"$APK" add -- "$@" || die "apk add failed"
+	"$APK" add --update-cache -- "$@" || die "apk add failed"
 	echo "installed: $*"
 }
 

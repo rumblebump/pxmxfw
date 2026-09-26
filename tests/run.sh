@@ -367,7 +367,7 @@ chmod +x "$T/fakebin/apk"
 fresh_etc "$T/etc"
 pkg() { PATH="$T/fakebin:$PATH" PXMXFW_ETC=$T/etc "$PXMXFW" "$@"; }
 : > "$T/apk.log"
-pkg pkg-add nano 'libstdc++' > /dev/null && grep -qx 'add -- nano libstdc++' "$T/apk.log" && ok || bad "pkg-add runs apk add"
+pkg pkg-add nano 'libstdc++' > /dev/null && grep -qx 'add --update-cache -- nano libstdc++' "$T/apk.log" && ok || bad "pkg-add runs apk add"
 pkg pkg-add nano > /dev/null && [ "$(grep -cx nano "$T/etc/packages")" = 1 ] && ok || bad "pkg-add lists a package once"
 pkg pkg-list | grep -qx 'nano 8.4-r0' && pkg pkg-list | grep -qx 'libstdc++ 14.2.0-r6' && ok || bad "pkg-list shows versions: $(pkg pkg-list)"
 pkg pkg-add 'nano;reboot' > /dev/null 2>&1 && bad "pkg-add accepts a bad name" || ok
@@ -380,7 +380,7 @@ pkg pkg-del nano > /dev/null && ! grep -qx nano "$T/etc/packages" && grep -qx 'l
 grep -q '^# Extra Alpine packages' "$T/etc/packages" && ok || bad "pkg-del keeps comments"
 printf 'openssh\n' >> "$T/etc/packages"
 : > "$T/apk.log"
-pkg pkg-sync > /dev/null && grep -qx 'add -- libstdc++ openssh' "$T/apk.log" && ok || bad "pkg-sync installs the list: $(cat "$T/apk.log")"
+pkg pkg-sync > /dev/null && grep -qx 'add --update-cache -- libstdc++ openssh' "$T/apk.log" && ok || bad "pkg-sync installs the list: $(cat "$T/apk.log")"
 pkg pkg-search nano | grep -q '^nano-8.4-r0 - ' && ok || bad "pkg-search"
 pkg pkg-search '*' > /dev/null 2>&1 && bad "pkg-search accepts a pattern" || ok
 
