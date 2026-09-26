@@ -33,7 +33,7 @@ const fakePxmxfw = `#!/bin/sh
 case $1 in
 	validate) if grep -q bad "$3"; then echo "$3:2: bad value"; exit 1; fi ;;
 	apply) echo applied ;;
-	status) echo firewall=active ;;
+	status) echo firewall=active; echo "addr=eth0 10.20.0.5/24"; echo "addr=eth0 fd00::5/64" ;;
 	detect) ;;
 	wg-keypair) echo private=PRIV; echo public=PUB ;;
 	pkg-list) echo "nano 8.4-r0" ;;

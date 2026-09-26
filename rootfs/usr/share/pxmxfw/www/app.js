@@ -150,7 +150,10 @@ function network(cidr) {
 const SETTINGS_ORDER = ['NAT', 'WAN_PING', 'IPV6', 'WEBUI_PORT', 'WEBUI_WAN', 'DNSMASQ',
 	'DNS_UPSTREAM', 'DNS_DOMAIN', 'DHCP_LEASE'];
 
-// "eth2 role=lan addr=10.0.2.1/24 dhcp=a-b # c" <-> row object
+// What a lan or isolated interface may reach on the firewall itself
+const ALLOW = ['ping', 'ssh', 'dns', 'dhcp', 'webui'];
+
+// "eth2 role=lan addr=10.0.2.1/24 dhcp=a-b allow=ping type=vlan link=eth1 vid=10 # c" <-> row object
 function parseIface(line) {
 	const [[name, ...kvs], comment] = parseRule(line);
 	const kv = Object.fromEntries(kvs.map(f => [f.slice(0, f.indexOf('=')), f.slice(f.indexOf('=') + 1)]));
@@ -161,6 +164,9 @@ function parseIface(line) {
 		addrMode: mode(kv.addr), addr: mode(kv.addr) === 'static' ? kv.addr : '',
 		addr6Mode: mode(kv.addr6), addr6: mode(kv.addr6) === 'static' ? kv.addr6 : '',
 		dhcpStart, dhcpEnd,
+		// without allow= everything is allowed (interfaces from the first boot)
+		allow: kv.allow === undefined ? [...ALLOW] : kv.allow === 'none' ? [] : kv.allow.split(','),
+		type: kv.type || '', link: kv.link || '', vid: kv.vid || '', ports: kv.ports || '',
 	};
 }
 function ifaceLine(r) {
@@ -170,8 +176,21 @@ function ifaceLine(r) {
 		if (r.addr6Mode !== 'proxmox') f.push(`addr6=${r.addr6Mode === 'static' ? r.addr6.trim() : 'none'}`);
 		if ((r.role === 'lan' || r.role === 'isolated') && (r.dhcpStart.trim() || r.dhcpEnd.trim()))
 			f.push(`dhcp=${r.dhcpStart.trim()}-${r.dhcpEnd.trim()}`);
+		const allow = ALLOW.filter(a => r.allow.includes(a));
+		if (allow.length !== ALLOW.length) f.push(`allow=${allow.join(',') || 'none'}`);
+		if (r.type === 'vlan') f.push('type=vlan', `link=${r.link}`, `vid=${String(r.vid).trim()}`);
+		if (r.type === 'bridge') f.push('type=bridge', ...(r.ports ? [`ports=${r.ports}`] : []));
 	}
 	return f.join(' ') + (r.comment.trim() ? ` # ${r.comment.trim()}` : '');
+}
+
+// A new interface: routed (role lan) and reachable only by ping, unless
+// the options say otherwise
+function newIface(name, o = {}) {
+	return {
+		name, role: 'lan', comment: '', addrMode: 'none', addr: '', addr6Mode: 'none', addr6: '',
+		dhcpStart: '', dhcpEnd: '', allow: ['ping'], type: '', link: '', vid: '', ports: '', ...o,
+	};
 }
 
 document.addEventListener('alpine:init', () => {
@@ -215,6 +234,10 @@ document.addEventListener('alpine:init', () => {
 		leases: [],
 		checks: [],
 		ctidValue: '',
+		subnetPool: '',
+		ALLOW,
+		// the Add interface form
+		adding: null,
 
 		async init() {
 			try {
@@ -231,7 +254,11 @@ document.addEventListener('alpine:init', () => {
 			this.login.need = [];
 			this.login.flow = null;
 			await Promise.all([this.refresh(), this.loadConfig(), this.loadSecurity(), this.loadPkgs()]);
-			try { this.ctidValue = parseKV(await this.call('prefs')).ctid || ''; } catch (e) { /* not important */ }
+			try {
+				const prefs = parseKV(await this.call('prefs'));
+				this.ctidValue = prefs.ctid || '';
+				this.subnetPool = prefs.subnet_pool || '';
+			} catch (e) { /* not important */ }
 		},
 
 		async doLogin(extra = {}) {
@@ -426,6 +453,8 @@ document.addEventListener('alpine:init', () => {
 					const [tunnel, key, endpoint, handshake, rx, tx] = l.slice(7).split(' ');
 					return { tunnel, key, endpoint, handshake: Number(handshake), rx: Number(rx), tx: Number(tx) };
 				});
+				kv.features = Object.fromEntries(lines(st).filter(l => l.startsWith('feature='))
+					.map(l => l.slice(8).split(' ')).map(([f, v]) => [f, v === 'yes']));
 				kv.ifaces = lines(st).filter(l => l.startsWith('iface=')).map(l => {
 					const [name, role, state, pve4, pve6] = l.slice(6).split(' ');
 					return { name, role, state, pve4, pve6 };
@@ -450,8 +479,7 @@ document.addEventListener('alpine:init', () => {
 				this.ifaces = lines(ifc).map(parseIface);
 				for (const t of this.tunnels) {
 					if (!this.ifaces.some(r => r.name === t.name)) {
-						this.ifaces.push({ name: t.name, role: 'lan', comment: 'WireGuard', addrMode: 'none', addr: '',
-							addr6Mode: 'none', addr6: '', dhcpStart: '', dhcpEnd: '' });
+						this.ifaces.push(newIface(t.name, { comment: 'WireGuard', addrMode: 'none' }));
 					}
 				}
 				this.services = lines(sv).map(parseRule).map(([[proto, port], comment]) => ({ proto, port, comment }));
@@ -510,13 +538,74 @@ document.addEventListener('alpine:init', () => {
 			const ago = Math.max(0, Math.round(Date.now() / 1000 - s.handshake));
 			return ago < 120 ? `${ago}s ago` : ago < 7200 ? `${Math.round(ago / 60)}m ago` : `${Math.round(ago / 3600)}h ago`;
 		},
-		addTunnel() {
+		freeName(prefix) {
 			let i = 0;
-			while (this.ifaces.some(r => r.name === `wg${i}`)) i++;
-			const name = `wg${i}`;
-			this.tunnels.push({ name, port: String(51820 + i), public: '', comment: '', peers: [], export: '' });
-			this.ifaces.push({ name, role: 'lan', comment: 'WireGuard', addrMode: 'static', addr: `10.99.${i}.1/24`,
-				addr6Mode: 'none', addr6: '', dhcpStart: '', dhcpEnd: '' });
+			while (this.ifaces.some(r => r.name === `${prefix}${i}`)) i++;
+			return `${prefix}${i}`;
+		},
+		async proposeAddr(name) {
+			try { return (await this.call('propose-subnet', { name })).trim(); } catch (e) { this.show('warn', e.message); return ''; }
+		},
+		async addTunnel() {
+			const name = this.freeName('wg');
+			const addr = await this.proposeAddr(name);
+			this.tunnels.push({ name, port: String(51820 + Number(name.slice(2))), public: '', comment: '', peers: [], export: '' });
+			this.ifaces.push(newIface(name, { comment: 'WireGuard', addrMode: addr ? 'static' : 'none', addr }));
+		},
+
+		// ---- Add interface (VLAN, bridge, WireGuard tunnel) ----
+		feature(f) { return !!(this.status.features || {})[f]; },
+		// NICs a VLAN can sit on: anything listed except bridge ports
+		vlanParents() {
+			return this.ifaces.filter(r => r.type !== 'vlan' && !this.bridgeOf(r.name) && !this.tunnels.some(t => t.name === r.name)).map(r => r.name);
+		},
+		// NICs free to join a new bridge: switched off, not WAN, in no bridge
+		bridgeCandidates() { return this.ifaces.filter(r => r.role === 'off' && r.type !== 'bridge' && !this.bridgeOf(r.name)).map(r => r.name); },
+		bridgeOf(name) { return this.ifaces.find(r => r.type === 'bridge' && r.ports.split(',').includes(name)); },
+		async startAdd() {
+			const kind = this.feature('vlan') ? 'vlan' : this.feature('bridge') ? 'bridge' : 'wireguard';
+			const link = (this.ifaces.find(r => r.role === 'lan') || this.ifaces[0] || {}).name || 'eth1';
+			this.adding = { kind, link, vid: '10', name: '', ports: [], addr: '', dhcp: false, comment: '' };
+			await this.addKind();
+		},
+		async addKind() {
+			const a = this.adding;
+			a.name = a.kind === 'vlan' ? `${a.link}.${a.vid}`.slice(0, 15) : this.freeName(a.kind === 'bridge' ? 'br' : 'wg');
+			a.addr = await this.proposeAddr(a.name);
+		},
+		addVlanName() { const a = this.adding; a.name = `${a.link}.${a.vid}`.slice(0, 15); },
+		async finishAdd() {
+			const a = this.adding;
+			if (a.kind === 'wireguard') { this.adding = null; await this.addTunnel(); this.tab = 'wireguard'; return; }
+			if (!/^[A-Za-z0-9_.-]{1,15}$/.test(a.name) || this.ifaces.some(r => r.name === a.name)) {
+				this.show('warn', 'Pick an unused name of at most 15 letters, digits, dots, dashes or underscores.'); return;
+			}
+			if (a.kind === 'vlan' && !(Number(a.vid) >= 1 && Number(a.vid) <= 4094)) { this.show('warn', 'The VLAN ID is 1 to 4094.'); return; }
+			const r = newIface(a.name, {
+				comment: a.comment, addrMode: a.addr ? 'static' : 'none', addr: a.addr,
+				type: a.kind, link: a.kind === 'vlan' ? a.link : '', vid: a.kind === 'vlan' ? a.vid : '',
+				ports: a.kind === 'bridge' ? a.ports.join(',') : '',
+			});
+			if (a.dhcp && a.addr) {
+				const n = network(a.addr);
+				r.dhcpStart = n2ip(n.base + 100); r.dhcpEnd = n2ip(n.base + 200);
+				r.allow = ['ping', 'dns', 'dhcp'];
+			}
+			// bridge ports carry no role of their own
+			for (const p of a.ports) this.ifaceOf(p).role = 'off';
+			this.ifaces.push(r);
+			this.adding = null;
+			this.show('ok', `${r.name} added. Click Save and apply to create it.`);
+		},
+		removeIface(r) { this.ifaces = this.ifaces.filter(x => x !== r); },
+		toggleAllow(r, a, ev) {
+			r.allow = ev.target.checked ? [...new Set([...r.allow, a])] : r.allow.filter(x => x !== a);
+			if (a === 'webui' && !ev.target.checked && this.settings.WEBUI_WAN !== 'yes' &&
+				!this.ifaces.some(x => (x.role === 'lan' || x.role === 'isolated') && x.allow.includes('webui')))
+				this.show('warn', 'No interface allows the web UI now. After applying it can only be reached from inside the container.');
+		},
+		async savePool() {
+			try { await this.call('pref', { name: 'subnet_pool', body: this.subnetPool.trim() }); } catch (e) { this.show('fail', e.message); }
 		},
 		removeTunnel(ti) {
 			const name = this.tunnels[ti].name;

@@ -67,3 +67,8 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .tunnel-head h3 { font-size: 15px; text-transform: none; color: var(--text); margin: 12px 0; }
 .tunnel-head .link { margin-left: auto; }
 code { font-size: 12px; word-break: break-all; }
+.allow { display: flex; flex-wrap: wrap; gap: 2px 10px; }
+.allow .check { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+td input[type=checkbox], .form input[type=checkbox] { width: auto; }
+.form h3 { margin: 0 0 8px; }
+.form.card > div > div { display: grid; gap: 8px; margin-bottom: 8px; }

@@ -361,6 +361,31 @@ env PATH="$T/ipbin:$PATH" PXMXFW_ETC="$T/etc" PXMXFW_SYSNET="$T/sys" PXMXFW_PROC
 grep -q "^wg=wg0 .* 51820 present" "$T/out" && ok || bad "status lists the tunnel: $(cat "$T/out")"
 grep -q "$K2" "$T/out" && bad "status leaks the private key" || ok
 
+# A real VLAN and bridge, when this kernel can make them (e.g. in CI)
+if [ -n "$NFT" ] && unshare -n sh -c 'ip link add d0 type dummy && ip link add link d0 name d0.5 type vlan id 5 && ip link add b0 type bridge' 2>/dev/null; then
+	fresh_etc "$T/etc"
+	printf 'eth0 role=wan\neth1 role=lan addr=192.168.10.1/24\nvl10 role=lan type=vlan link=eth1 vid=10 addr=10.0.10.1/24 allow=ping\nbr0 role=lan type=bridge ports=eth3 addr=10.0.30.1/24\neth3 role=off\n' > "$T/etc/interfaces"
+	PXMXFW_ETC=$T/etc "$PXMXFW" render nft > "$T/etc/ruleset.nft"
+	cat > "$T/links.sh" <<EOF
+mount -t sysfs sysfs /sys
+ip link add eth1 type dummy && ip link add eth3 type dummy
+export PXMXFW_ETC='$T/etc' PXMXFW_PROCSYS='$T/procsys' PXMXFW_NFT_MAIN='$T/main.nft' PXMXFW_DNSMASQ_CONF='$T/dnsmasq.conf'
+'$PXMXFW' apply > /dev/null || exit 1
+ip -d link show dev vl10; ip -4 addr show dev vl10; ip link show dev eth3; ip -4 addr show dev br0
+sed -i '/^vl10 /d' '$T/etc/interfaces'
+'$PXMXFW' apply > /dev/null || exit 1
+ip link show dev vl10 2>/dev/null && echo "vl10 still there"
+ip link show dev eth1 > /dev/null || echo "eth1 was removed"
+EOF
+	if unshare -nm sh "$T/links.sh" > "$T/out" 2>&1 &&
+		grep -q 'vl10@eth1' "$T/out" && grep -q 'vlan protocol 802.1Q id 10' "$T/out" && grep -q '10.0.10.1/24' "$T/out" &&
+		grep -q 'master br0' "$T/out" && grep -q '10.0.30.1/24' "$T/out" &&
+		! grep -q 'still there\|was removed' "$T/out"; then ok
+	else bad "real VLAN and bridge: $(cat "$T/out")"; fi
+else
+	echo "note: cannot create VLAN or bridge interfaces here, skipping that test"
+fi
+
 # A real tunnel, when this kernel and system can make one (e.g. in CI)
 if [ -n "$NFT" ] && command -v wg >/dev/null && [ "$(command -v wg)" != "$T/ipbin/wg" ] &&
 	unshare -n sh -c 'ip link add dev wgtest type wireguard' 2>/dev/null; then

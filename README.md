@@ -78,6 +78,20 @@ defaults to `/etc/pxmxfw`:
 NICs you add later (`pct set 200 -net2 name=eth2,bridge=vmbr2`) are found at
 the next start or when you open the web UI, and start with `role=off`.
 
+### VLANs, bridges and tunnels
+
+**Add interface** on the Interfaces page creates a VLAN (on a NIC, with an
+802.1Q ID), a bridge (joining NICs that are switched off) or a WireGuard
+tunnel. A new interface starts as `lan`, so it is routed to the other lans
+and to WAN, answers ping and reaches nothing else on the firewall. It gets
+the first free /24 of the subnet pool (`10.20.0.0/16` unless you change it
+there). Tick DHCP to hand out `.100` to `.200`, which also allows DNS and
+DHCP.
+
+VLANs need the `8021q` module and bridges the `bridge` module on the
+Proxmox host. A kind whose module is not loaded is greyed out, and the
+Checks page shows the `modprobe` command.
+
 ## Web UI
 
 Open `https://<LAN address>:8443` and log in as `root` (or a member of the
@@ -183,7 +197,7 @@ dnsmasq config. Nothing else needs editing.
 | File | Content |
 | --- | --- |
 | `pxmxfw.conf` | `KEY=value` settings: `NAT`, `WAN_PING`, `IPV6`, `WEBUI_PORT`, `WEBUI_WAN`, `DNSMASQ`, `DNS_UPSTREAM`, `DNS_DOMAIN`, `DHCP_LEASE` |
-| `interfaces` | `IFACE role=wan\|lan\|isolated\|off [addr=proxmox\|none\|IP/PREFIX] [addr6=...] [dhcp=START-END]` |
+| `interfaces` | `IFACE role=wan\|lan\|isolated\|off [addr=proxmox\|none\|IP/PREFIX] [addr6=...] [dhcp=START-END] [allow=ping,ssh,dns,dhcp,webui\|none] [type=vlan link=IFACE vid=N \| type=bridge ports=IFACE,...]` |
 | `services` | `tcp\|udp PORT[-PORT]`: open on WAN to the firewall itself |
 | `forwards` | `tcp\|udp WANPORT LANIP LANPORT`: port forwards |
 | `hosts` | `IP NAME [MAC]`: local DNS names, fixed DHCP leases with a MAC |
@@ -191,7 +205,10 @@ dnsmasq config. Nothing else needs editing.
 | `wg/NAME.key` | a tunnel's private key, created on the first apply |
 
 Roles: `lan` reaches the WAN and every other `lan`; `isolated` reaches the
-WAN only; `off` drops everything. With `IPV6=no` (the default) only IPv4 is
+WAN only; `off` drops everything. `allow` is what a `lan` or `isolated`
+interface may reach on the firewall itself; without it, everything (how the
+LAN from the first boot starts). VLANs and bridges are created by `pxmxfw
+apply` and removed again when their line is removed. With `IPV6=no` (the default) only IPv4 is
 forwarded.
 
 ```sh

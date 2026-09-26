@@ -311,7 +311,7 @@ cmd_firstboot() {
 
 	{
 		echo "# Network interfaces. eth0 (net0 in Proxmox) is the WAN."
-		echo "# IFACE role=wan|lan|isolated|off [addr=proxmox|none|IP/PREFIX] [addr6=...] [dhcp=START-END]"
+		echo "# IFACE role=wan|lan|isolated|off [addr=proxmox|none|IP/PREFIX] [addr6=...] [dhcp=START-END] [allow=...] [type=vlan|bridge ...]"
 		wan=
 		for i in $(present_ifaces); do
 			if [ -z "$wan" ] && [ "$i" = eth0 ]; then
