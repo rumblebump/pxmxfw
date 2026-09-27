@@ -86,6 +86,12 @@ expect_invalid interfaces "$(printf '%s\nbr0 role=lan type=bridge ports=eth2,' "
 expect_invalid interfaces "$(printf '%s\neth2 role=lan allow=ftp' "$I2")"
 expect_invalid interfaces "$(printf '%s\neth2 role=lan allow=ping;reboot' "$I2")"
 expect_invalid interfaces 'eth0 role=wan allow=ping'
+expect_valid interfaces "$(printf '%s\neth2 role=lan addr=10.0.2.1/24 dhcp=10.0.2.100-10.0.2.200 lease=1d dns=1.1.1.1,9.9.9.9 gateway=none' "$I2")"
+expect_invalid interfaces "$(printf '%s\neth2 role=lan lease=forever' "$I2")"
+expect_invalid interfaces "$(printf '%s\neth2 role=lan dns=1.1.1.1,' "$I2")"
+expect_invalid interfaces "$(printf '%s\neth2 role=lan dns=dns.example' "$I2")"
+expect_invalid interfaces "$(printf '%s\neth2 role=lan gateway=10.0.2.300' "$I2")"
+expect_invalid interfaces 'eth0 role=wan lease=1h'
 expect_invalid interfaces 'eth0 role=wan type=bridge' 
 
 expect_valid services 'tcp 22'
@@ -173,9 +179,15 @@ grep -qx 'interface=eth1' "$T/dnsmasq.conf" && grep -qx 'interface=eth2' "$T/dns
 grep -qx 'dhcp-range=set:eth1,192.168.10.100,192.168.10.200,12h' "$T/dnsmasq.conf" && ok || bad "dnsmasq DHCP range"
 grep -q 'ra-stateless' "$T/dnsmasq.conf" && bad "IPV6=no still sends router advertisements" || ok
 grep -qx 'dhcp-host=52:54:00:12:34:56,192.168.10.10,nas' "$T/dnsmasq.conf" && ok || bad "dnsmasq static lease"
-printf 'eth0 role=wan\neth1 role=lan\neth2 role=lan addr=10.0.2.1/24 allow=ping\n' > "$T/etc/interfaces"
+printf 'eth0 role=wan\neth1 role=lan dhcp=192.168.10.100-192.168.10.200 lease=1d dns=1.1.1.1,9.9.9.9 gateway=none\neth2 role=lan addr=10.0.2.1/24 allow=ping\n' > "$T/etc/interfaces"
 PXMXFW_ETC=$T/etc "$PXMXFW" render dnsmasq > "$T/dnsmasq2.conf" 2>&1
 grep -qx 'interface=eth1' "$T/dnsmasq2.conf" && ! grep -q 'interface=eth2' "$T/dnsmasq2.conf" && ok || bad "dnsmasq skips allow=ping interfaces"
+grep -qx 'dhcp-range=set:eth1,192.168.10.100,192.168.10.200,1d' "$T/dnsmasq2.conf" && ok || bad "per-interface lease time"
+grep -qx 'dhcp-option=tag:eth1,option:dns-server,1.1.1.1,9.9.9.9' "$T/dnsmasq2.conf" && ok || bad "per-interface DNS servers"
+grep -qx 'dhcp-option=tag:eth1,option:router' "$T/dnsmasq2.conf" && ok || bad "gateway=none sends no router"
+if command -v dnsmasq >/dev/null; then
+	dnsmasq --test -C "$T/dnsmasq2.conf" >/dev/null 2>&1 && ok || bad "dnsmasq --test per-interface options: $(dnsmasq --test -C "$T/dnsmasq2.conf" 2>&1)"
+fi
 printf 'eth0 role=wan\neth1 role=lan allow=ping\n' > "$T/etc/interfaces"
 PXMXFW_ETC=$T/etc "$PXMXFW" render dnsmasq > /dev/null 2>&1 && bad "DNSMASQ=yes with no dns interface accepted" || ok
 printf 'eth0 role=wan\neth1 role=lan dhcp=192.168.10.100-192.168.10.200\neth2 role=isolated addr=10.0.2.1/24 addr6=none\n' > "$T/etc/interfaces"

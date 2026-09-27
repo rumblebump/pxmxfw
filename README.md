@@ -110,8 +110,11 @@ Open `https://<LAN address>:8443` and log in as `root` (or a member of the
 - **Interfaces**: role of each NIC, addresses for NICs Proxmox does not
   configure, DHCP ranges, and the IPv6 switch.
 - **Firewall**: NAT, ping, ports open on WAN, port forwards.
-- **DNS & DHCP**: turn dnsmasq on, upstream servers, local names and fixed
-  leases.
+- **DNS & DHCP**: global settings: turn dnsmasq on, upstream servers, the
+  local domain, the default lease time, and names outside your subnets.
+  Per interface (Interfaces, *DHCP & DNS*): the DHCP range, lease time, DNS
+  servers and gateway handed out, fixed addresses and names, and its
+  current leases.
 - **Checks**: tests each kernel feature the firewall needs (nftables,
   conntrack, NAT, WireGuard), IP forwarding and the interfaces. A container
   cannot load kernel modules, so for anything missing it shows the
@@ -210,7 +213,7 @@ dnsmasq config. Nothing else needs editing.
 | File | Content |
 | --- | --- |
 | `pxmxfw.conf` | `KEY=value` settings: `NAT`, `WAN_PING`, `IPV6`, `WEBUI_PORT`, `WEBUI_WAN`, `DNSMASQ`, `DNS_UPSTREAM`, `DNS_DOMAIN`, `DHCP_LEASE` |
-| `interfaces` | `IFACE role=wan\|lan\|isolated\|off [addr=proxmox\|none\|IP/PREFIX] [addr6=...] [dhcp=START-END] [allow=ping,ssh,dns,dhcp,webui\|none] [type=vlan link=IFACE vid=N \| type=bridge ports=IFACE,...]` |
+| `interfaces` | `IFACE role=wan\|lan\|isolated\|off [addr=proxmox\|none\|IP/PREFIX] [addr6=...] [dhcp=START-END] [lease=TIME] [dns=IP,IP] [gateway=IP\|none] [allow=ping,ssh,dns,dhcp,webui\|none] [type=vlan link=IFACE vid=N \| type=bridge ports=IFACE,...]` |
 | `services` | `tcp\|udp PORT[-PORT]`: open on WAN to the firewall itself |
 | `forwards` | `tcp\|udp WANPORT LANIP LANPORT`: port forwards |
 | `hosts` | `IP NAME [MAC]`: local DNS names, fixed DHCP leases with a MAC |
