@@ -6,6 +6,11 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Publish this pxmxfw version from main, e.g. 0.2.0 (the +alpine part is added)
+        type: string
+        default: ''
   # Weekly rebuild of edge with fresh Alpine packages (and a Trivy scan).
   # When Alpine has a new release, this also publishes the next version.
   schedule:
@@ -69,10 +74,13 @@ jobs:
 
       # Automatic releases: when main is built on a newer Alpine than the
       # last v* release, publish the next patch version, e.g.
-      # v0.1.0+alpine3.22.6 -> v0.1.1+alpine3.22.7.
+      # v0.1.0+alpine3.22.6 -> v0.1.1+alpine3.22.7. A manual run with
+      # "release" set publishes that version instead.
       - name: Decide on an automatic release
         id: plan
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          RELEASE: ${{ inputs.release }}
         run: |
           branch=$(sed -n 's/^ALPINE_VERSION=\${ALPINE_VERSION:-\([0-9.]*\)}$/\1/p' build.sh)
           alpine=$(curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/v$branch/releases/x86_64/latest-releases.yaml" |
@@ -80,6 +88,15 @@ jobs:
           test -n "$alpine"
           last=$(git tag -l 'v*' --sort=-v:refname | head -n1)
           echo "Alpine $alpine; last release ${last:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -n "$RELEASE" ]; then
+            printf '%s\n' "$RELEASE" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' ||
+              { echo "::error::release must look like 1.2.3"; exit 1; }
+            ! git tag -l "v$RELEASE+*" | grep -q . ||
+              { echo "::error::v$RELEASE is already released"; exit 1; }
+            echo "tag=v$RELEASE+alpine$alpine" >> "$GITHUB_OUTPUT"
+            echo "alpine=$alpine" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           case $last in
             '') echo "No v* release yet, edge only"; exit 0 ;;
             *+alpine"$alpine") exit 0 ;;
@@ -197,7 +214,7 @@ jobs:
             --target "$GITHUB_SHA" --title "edge (latest main)" \
             --notes "Built from ${GITHUB_SHA::7} on main with Alpine $alpine. Not a release; use a v* release for production."
 
-      - name: Automatic release (new Alpine version)
+      - name: Release (new Alpine version, or manual)
         if: steps.plan.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -212,5 +229,5 @@ jobs:
           fi
           sha256sum *.tar.gz > SHA256SUMS
           gh release create "$TAG" *.tar.gz SHA256SUMS --target "$GITHUB_SHA" --title "$TAG" \
-            --notes "Automatic release: Alpine $alpine." --generate-notes
+            --notes "Built on Alpine $alpine." --generate-notes
           echo "Released $TAG" >> "$GITHUB_STEP_SUMMARY"

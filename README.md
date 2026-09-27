@@ -26,7 +26,8 @@ Edge is also rebuilt every Monday with fresh Alpine packages. Releases are
 tagged `v<pxmxfw version>+alpine<Alpine version>`, e.g. `v0.1.0+alpine3.22.6`.
 When a build of `main` (weekly or after a merge) lands on a newer Alpine than
 the last release, it publishes the next patch version automatically, e.g.
-`v0.1.1+alpine3.22.7`. For pxmxfw changes, push a tag with a higher version.
+`v0.1.1+alpine3.22.7`. For pxmxfw changes, run *Build template* on `main` from the Actions tab
+with a higher version in *release* (e.g. `0.2.0`), or push such a tag.
 Every build scans the template with [Trivy](https://trivy.dev) and lists known
 CVEs that have a fix in the run summary. [Renovate](https://docs.renovatebot.com)
 (`renovate.json`) opens PRs for Go modules, GitHub Actions and Trivy, and merges
