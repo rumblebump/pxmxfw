@@ -224,8 +224,11 @@ Then:
    certificate; see the README's
    [Login and security](../README.md#login-and-security).
 3. If machines on the LAN should get their addresses from pxmxfw, turn on
-   DNS and DHCP on the **DNS & DHCP** page. Otherwise point them at
-   `192.168.10.1` as their gateway by hand.
+   dnsmasq on the **DNS & DHCP** page (global settings: upstream servers,
+   domain, default lease time). The range, lease time, DNS servers, gateway
+   and fixed addresses for each network are in that interface's
+   *DHCP & DNS* panel on the **Interfaces** page. Otherwise point the
+   machines at `192.168.10.1` as their gateway by hand.
 
 If the container only has one NIC, the web UI is reachable from the WAN
 side at first so you can finish the setup. Turn that off once the LAN is
