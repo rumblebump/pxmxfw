@@ -12,7 +12,7 @@
   ],
   "customManagers": [
     {
-      "description": "Alpine branch the template is built on (ALPINE_VERSION in build.sh). Point releases are picked up by the weekly Alpine check.",
+      "description": "Alpine branch the template is built on (ALPINE_VERSION in build.sh). Point releases need no PR: every build uses the newest one.",
       "customType": "regex",
       "managerFilePatterns": [
         "/^build\\.sh$/"
@@ -37,13 +37,14 @@
   ],
   "packageRules": [
     {
-      "description": "A new Alpine branch changes every package in the template; review it on its own",
+      "description": "New Alpine branches merge on their own once CI passes; the build on main then publishes the next version",
       "matchDepNames": [
         "alpine"
       ],
       "labels": [
         "alpine"
-      ]
+      ],
+      "automerge": true
     }
   ]
 }
