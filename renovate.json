@@ -1,0 +1,50 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "osvVulnerabilityAlerts": true,
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "customManagers": [
+    {
+      "description": "Alpine branch the template is built on (ALPINE_VERSION in build.sh). Point releases need no PR: every build uses the newest one.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build\\.sh$/"
+      ],
+      "matchStrings": [
+        "ALPINE_VERSION=\\$\\{ALPINE_VERSION:-(?<currentValue>\\d+\\.\\d+)\\}"
+      ],
+      "depNameTemplate": "alpine",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)$"
+    },
+    {
+      "description": "Versions marked with a '# renovate:' comment on the line above",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\w+: (?<currentValue>\\S+)"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "New Alpine branches merge on their own once CI passes; the build on main then publishes the next version",
+      "matchDepNames": [
+        "alpine"
+      ],
+      "labels": [
+        "alpine"
+      ],
+      "automerge": true
+    }
+  ]
+}

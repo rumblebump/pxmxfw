@@ -6,6 +6,10 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+  # Weekly rebuild of edge with fresh Alpine packages (and a Trivy scan).
+  # When Alpine has a new release, this also publishes the next version.
+  schedule:
+    - cron: '17 5 * * 1' # Mondays 05:17 UTC
 
 permissions:
   contents: write
@@ -13,6 +17,10 @@ permissions:
 # one run per branch or tag at a time, so edge releases never race
 concurrency:
   group: build-${{ github.ref }}
+
+env:
+  # renovate: datasource=docker depName=aquasec/trivy
+  TRIVY_VERSION: 0.64.1
 
 jobs:
   test:
@@ -59,7 +67,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Automatic releases: when main is built on a newer Alpine than the
+      # last v* release, publish the next patch version, e.g.
+      # v0.1.0+alpine3.22.6 -> v0.1.1+alpine3.22.7.
+      - name: Decide on an automatic release
+        id: plan
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: |
+          branch=$(sed -n 's/^ALPINE_VERSION=\${ALPINE_VERSION:-\([0-9.]*\)}$/\1/p' build.sh)
+          alpine=$(curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/v$branch/releases/x86_64/latest-releases.yaml" |
+            sed -n 's/^ *version: \([0-9.]*\)$/\1/p' | head -n1)
+          test -n "$alpine"
+          last=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          echo "Alpine $alpine; last release ${last:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
+          case $last in
+            '') echo "No v* release yet, edge only"; exit 0 ;;
+            *+alpine"$alpine") exit 0 ;;
+          esac
+          ver=${last#v}
+          ver=${ver%%+*}
+          echo "tag=v${ver%.*}.$((${ver##*.} + 1))+alpine$alpine" >> "$GITHUB_OUTPUT"
+          echo "alpine=$alpine" >> "$GITHUB_OUTPUT"
+
       - name: Build template (podman)
+        env:
+          PXMXFW_VERSION: ${{ steps.plan.outputs.tag }}
         run: ./build.sh --podman -o out
 
       - name: Check config inside the template
@@ -70,6 +102,21 @@ jobs:
           sudo chroot /tmp/fw nft -c -f /etc/nftables.nft
           sudo chroot /tmp/fw dnsmasq --test
           ls -l out/
+
+      # Report only: known CVEs with a fix in Alpine or Go. Rebuilding picks
+      # up fixed Alpine packages; the weekly run does that for edge.
+      - name: CVE scan (Trivy)
+        run: |
+          sudo podman run --rm -v /tmp/fw:/fw:ro "docker.io/aquasec/trivy:$TRIVY_VERSION" \
+            rootfs --quiet --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL \
+            --exit-code 3 /fw > trivy.txt || rc=$?
+          cat trivy.txt
+          case ${rc:-0} in
+            0) echo "Trivy: no fixable HIGH or CRITICAL CVEs" >> "$GITHUB_STEP_SUMMARY" ;;
+            3) echo "::warning::Trivy found fixable HIGH or CRITICAL CVEs in the template"
+               { echo '```'; cat trivy.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY" ;;
+            *) exit "$rc" ;;
+          esac
 
       - name: Check the web UI login inside the template
         run: |
@@ -121,24 +168,49 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd out
+          alpine=$(ls alpine-*-pxmxfw-*_amd64.tar.gz | sed 's/^alpine-\([0-9.]*\)-pxmxfw-.*/\1/')
+          case $GITHUB_REF_NAME in
+            *+alpine*) [ "${GITHUB_REF_NAME##*+alpine}" = "$alpine" ] ||
+              { echo "::error::tag says Alpine ${GITHUB_REF_NAME##*+alpine}, built on $alpine"; exit 1; } ;;
+          esac
           # Fixed name so releases/latest/download/pxmxfw_amd64.tar.gz always works
           cp alpine-*-pxmxfw-*_amd64.tar.gz pxmxfw_amd64.tar.gz
           sha256sum *.tar.gz > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" *.tar.gz SHA256SUMS --generate-notes
+          gh release create "$GITHUB_REF_NAME" *.tar.gz SHA256SUMS --title "$GITHUB_REF_NAME" \
+            --notes "Built on Alpine $alpine." --generate-notes
 
-      # Every merge to main replaces the "edge" prerelease, so the newest
-      # build has a fixed URL Proxmox can download (workflow artifacts are
-      # zipped and need a GitHub login):
+      # Every merge to main and the weekly run replace the "edge"
+      # prerelease, so the newest build has a fixed URL Proxmox can download
+      # (workflow artifacts are zipped and need a GitHub login):
       # releases/download/edge/pxmxfw_amd64.tar.gz
       - name: Update the edge prerelease
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd out
+          alpine=$(ls alpine-*-pxmxfw-*_amd64.tar.gz | sed 's/^alpine-\([0-9.]*\)-pxmxfw-.*/\1/')
           cp alpine-*-pxmxfw-*_amd64.tar.gz pxmxfw_amd64.tar.gz
           sha256sum pxmxfw_amd64.tar.gz > SHA256SUMS
           gh release delete edge --cleanup-tag --yes 2>/dev/null || true
           gh release create edge pxmxfw_amd64.tar.gz SHA256SUMS --prerelease --latest=false \
             --target "$GITHUB_SHA" --title "edge (latest main)" \
-            --notes "Built from ${GITHUB_SHA::7} on main. Not a release; use a v* release for production."
+            --notes "Built from ${GITHUB_SHA::7} on main with Alpine $alpine. Not a release; use a v* release for production."
+
+      - name: Automatic release (new Alpine version)
+        if: steps.plan.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          PLANNED: ${{ steps.plan.outputs.alpine }}
+        run: |
+          cd out
+          alpine=$(ls alpine-*-pxmxfw-*_amd64.tar.gz | sed 's/^alpine-\([0-9.]*\)-pxmxfw-.*/\1/')
+          if [ "$alpine" != "$PLANNED" ]; then
+            echo "::warning::built on Alpine $alpine, expected $PLANNED; no release this time"
+            exit 0
+          fi
+          sha256sum *.tar.gz > SHA256SUMS
+          gh release create "$TAG" *.tar.gz SHA256SUMS --target "$GITHUB_SHA" --title "$TAG" \
+            --notes "Automatic release: Alpine $alpine." --generate-notes
+          echo "Released $TAG" >> "$GITHUB_STEP_SUMMARY"

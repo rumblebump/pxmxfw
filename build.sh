@@ -8,7 +8,7 @@
 #
 # Usage: ./build.sh [--podman] [-v ALPINE_VERSION] [-m MIRROR] [-o OUTDIR] [-r MINIROOTFS]
 #   --podman  build inside an Alpine container with podman
-#   -v  Alpine branch, e.g. 3.22 (default: $ALPINE_VERSION or 3.22)
+#   -v  Alpine branch, e.g. 3.22 (default: $ALPINE_VERSION or ALPINE_VERSION below)
 #   -m  Alpine mirror (default: $ALPINE_MIRROR or https://dl-cdn.alpinelinux.org/alpine)
 #   -o  output directory (default: ./out)
 #   -r  use a local minirootfs .tar.gz instead of downloading one
