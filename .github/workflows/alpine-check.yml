@@ -1,0 +1,58 @@
+name: Weekly Alpine check
+
+# Once a week, look for a new Alpine point release on the branch build.sh
+# uses (e.g. 3.22.6 -> 3.22.7). If the edge release was built on an older
+# one, run the Build template workflow on main, which replaces edge.
+on:
+  schedule:
+    - cron: '17 5 * * 1' # Mondays 05:17 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild edge even if Alpine has not changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write # to start the build workflow
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Compare Alpine releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          mirror=https://dl-cdn.alpinelinux.org/alpine
+          latest() {
+            curl -fsSL "$mirror/$1/releases/x86_64/latest-releases.yaml" |
+              sed -n 's/^ *version: \([0-9.]*\)$/\1/p' | head -n1
+          }
+          branch=$(sed -n 's/^ALPINE_VERSION=\${ALPINE_VERSION:-\([0-9.]*\)}$/\1/p' build.sh)
+          test -n "$branch"
+          new=$(latest "v$branch")
+          test -n "$new"
+          # build.yml writes "Alpine X.Y.Z" into the edge release notes
+          built=$(gh release view edge --json body -q .body 2>/dev/null |
+            sed -n 's/.*Alpine \([0-9][0-9.]*[0-9]\).*/\1/p' | head -n1) || true
+          echo "Alpine $branch: latest $new, edge built on ${built:-unknown}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          stable=$(latest latest-stable)
+          case $stable in
+            "$branch".*|'') ;;
+            *) echo "::notice::Alpine $stable is out; build.sh still uses $branch" ;;
+          esac
+
+          if [ "$new" = "$built" ] && [ "$FORCE" != true ]; then
+            echo "Nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh workflow run build.yml --ref main
+          echo "Started a rebuild of edge on Alpine $new." | tee -a "$GITHUB_STEP_SUMMARY"

@@ -22,6 +22,9 @@ The newest build of `main` (for testing, not a release) is always at
 `https://github.com/rumblebump/pxmxfw/releases/download/edge/pxmxfw_amd64.tar.gz`.
 The zipped files under a workflow run's *Artifacts* need a GitHub login, so
 Proxmox cannot download those.
+Every Monday a scheduled workflow checks for a new Alpine point release and,
+if edge was built on an older one, rebuilds edge (the release notes name the
+Alpine version).
 
 ## Build the template
 

@@ -130,15 +130,18 @@ jobs:
       # build has a fixed URL Proxmox can download (workflow artifacts are
       # zipped and need a GitHub login):
       # releases/download/edge/pxmxfw_amd64.tar.gz
+      # The weekly Alpine check (alpine-check.yml) also starts this on main
+      # and reads the "Alpine X.Y.Z" line of the notes.
       - name: Update the edge prerelease
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd out
+          alpine=$(ls alpine-*-pxmxfw-*_amd64.tar.gz | sed 's/^alpine-\([0-9.]*\)-pxmxfw-.*/\1/')
           cp alpine-*-pxmxfw-*_amd64.tar.gz pxmxfw_amd64.tar.gz
           sha256sum pxmxfw_amd64.tar.gz > SHA256SUMS
           gh release delete edge --cleanup-tag --yes 2>/dev/null || true
           gh release create edge pxmxfw_amd64.tar.gz SHA256SUMS --prerelease --latest=false \
             --target "$GITHUB_SHA" --title "edge (latest main)" \
-            --notes "Built from ${GITHUB_SHA::7} on main. Not a release; use a v* release for production."
+            --notes "Built from ${GITHUB_SHA::7} on main with Alpine $alpine. Not a release; use a v* release for production."
