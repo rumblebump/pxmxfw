@@ -1,8 +1,10 @@
-name: Weekly Alpine check
+name: Weekly Alpine and CVE check
 
 # Once a week, look for a new Alpine point release on the branch build.sh
-# uses (e.g. 3.22.6 -> 3.22.7). If the edge release was built on an older
-# one, run the Build template workflow on main, which replaces edge.
+# uses (e.g. 3.22.6 -> 3.22.7) and scan the edge template for known CVEs
+# that have a fix. If edge was built on an older Alpine, or a fix is out,
+# run the Build template workflow on main, which replaces edge with fresh
+# packages. New Alpine branches (3.23) come as Renovate PRs instead.
 on:
   schedule:
     - cron: '17 5 * * 1' # Mondays 05:17 UTC
@@ -17,6 +19,10 @@ permissions:
   contents: read
   actions: write # to start the build workflow
 
+env:
+  # renovate: datasource=docker depName=aquasec/trivy
+  TRIVY_VERSION: 0.64.1
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -25,7 +31,7 @@ jobs:
         with:
           ref: main
 
-      - name: Compare Alpine releases
+      - name: Compare Alpine releases and scan edge
         env:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ inputs.force || false }}
@@ -50,9 +56,30 @@ jobs:
             *) echo "::notice::Alpine $stable is out; build.sh still uses $branch" ;;
           esac
 
-          if [ "$new" = "$built" ] && [ "$FORCE" != true ]; then
+          reason=
+          [ "$new" = "$built" ] || reason="Alpine $new"
+          [ "$FORCE" != true ] || reason="manual run"
+
+          # Known CVEs in edge that a rebuild would fix
+          if [ -z "$reason" ]; then
+            mkdir edge fw
+            gh release download edge -p pxmxfw_amd64.tar.gz -D edge
+            sudo tar -xzf edge/pxmxfw_amd64.tar.gz -C fw
+            sudo podman run --rm -v "$PWD/fw:/fw:ro" "docker.io/aquasec/trivy:$TRIVY_VERSION" \
+              rootfs --quiet --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL \
+              --exit-code 3 /fw > trivy.txt || rc=$?
+            cat trivy.txt
+            case ${rc:-0} in
+              0) ;;
+              3) reason="fixable CVEs"
+                 { echo '```'; cat trivy.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY" ;;
+              *) exit "$rc" ;;
+            esac
+          fi
+
+          if [ -z "$reason" ]; then
             echo "Nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           gh workflow run build.yml --ref main
-          echo "Started a rebuild of edge on Alpine $new." | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Started a rebuild of edge ($reason)." | tee -a "$GITHUB_STEP_SUMMARY"

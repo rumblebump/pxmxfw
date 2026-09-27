@@ -22,9 +22,13 @@ The newest build of `main` (for testing, not a release) is always at
 `https://github.com/rumblebump/pxmxfw/releases/download/edge/pxmxfw_amd64.tar.gz`.
 The zipped files under a workflow run's *Artifacts* need a GitHub login, so
 Proxmox cannot download those.
-Every Monday a scheduled workflow checks for a new Alpine point release and,
-if edge was built on an older one, rebuilds edge (the release notes name the
-Alpine version).
+Every Monday a scheduled workflow checks for a new Alpine point release and
+scans edge with [Trivy](https://trivy.dev) for known CVEs that have a fix. If
+either turns something up, it rebuilds edge (the release notes name the Alpine
+version). Every build also runs the Trivy scan and shows the result in the run
+summary. [Renovate](https://docs.renovatebot.com) (`renovate.json`) opens PRs
+for new Go modules, GitHub Actions, Trivy and Alpine branches (e.g. 3.23); it
+needs the Renovate GitHub App installed on the repository.
 
 ## Build the template
 

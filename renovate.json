@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "osvVulnerabilityAlerts": true,
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "customManagers": [
+    {
+      "description": "Alpine branch the template is built on (ALPINE_VERSION in build.sh). Point releases are picked up by the weekly Alpine check.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build\\.sh$/"
+      ],
+      "matchStrings": [
+        "ALPINE_VERSION=\\$\\{ALPINE_VERSION:-(?<currentValue>\\d+\\.\\d+)\\}"
+      ],
+      "depNameTemplate": "alpine",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)$"
+    },
+    {
+      "description": "Versions marked with a '# renovate:' comment on the line above",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\w+: (?<currentValue>\\S+)"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "A new Alpine branch changes every package in the template; review it on its own",
+      "matchDepNames": [
+        "alpine"
+      ],
+      "labels": [
+        "alpine"
+      ]
+    }
+  ]
+}
