@@ -61,6 +61,34 @@ A VLAN-aware bridge works too: put both NICs on the same VLAN-aware bridge
 with different tags (`tag=10` for WAN, `tag=20` for LAN). They are then as
 separate as two bridges, as long as no other port joins both VLANs untagged.
 
+### Bonds and Open vSwitch
+
+Bonds, Linux bridges, VLAN-aware bridges and Open vSwitch (OVS) bridges,
+bonds and internal ports all stay on the host. A container can only be
+attached to a bridge: every `netX` becomes a veth pair, one end plugged
+into the bridge (Linux or OVS) and the other end showing up in the
+container as a plain Ethernet NIC (`eth0`, `eth1`, ...). pxmxfw never sees
+the bond, the physical ports or OVS, and needs nothing extra for them.
+
+- **Bond**: make the bond on the host (for example `bond0` from `enp1s0`
+  and `enp2s0`) and use it as the port of `vmbr0` (Linux bridge) or of an
+  OVS bridge. The container's `eth0` on that bridge gets the redundancy or
+  bandwidth for free. A bond inside the container would gain nothing,
+  since all its NICs end on the same host bridge.
+- **OVS bridge**: set `bridge=` to the OVS bridge exactly as for a Linux
+  bridge; `tag=`, `trunks=`, `mtu=` and `rate=` work the same.
+- **Jumbo frames**: set the MTU on the bond and bridge on the host, then
+  `mtu=9000` on the container's `netX`. pxmxfw keeps the MTU Proxmox sets.
+
+**Several VLANs over one NIC (trunk)**: instead of one `netX` per network,
+give the container one NIC on a VLAN-aware bridge or OVS bridge with
+`trunks=` and no `tag=`, for example
+`pct set 200 -net1 name=eth1,bridge=vmbr1,trunks=10;20;30`. The VLANs then
+arrive tagged on `eth1`. Leave `eth1` at role `off` and add one VLAN per
+network on the **Interfaces** page (link `eth1`, id `10`, role `lan`, and so
+on). pxmxfw brings `eth1` up for its VLANs even while its own role is
+`off`. This needs the `8021q` module (step 5).
+
 ## 3. Privileged or unprivileged
 
 Use an **unprivileged** container. Everything pxmxfw does works in one.
