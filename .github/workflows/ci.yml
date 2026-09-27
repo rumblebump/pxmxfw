@@ -1,5 +1,6 @@
-name: Build template
+name: CI
 
+# Stages: test -> build -> test-template + security -> release
 on:
   push:
     branches: [main]
@@ -17,7 +18,7 @@ on:
     - cron: '17 5 * * 1' # Mondays 05:17 UTC
 
 permissions:
-  contents: write
+  contents: read
 
 # one run per branch or tag at a time, so edge releases never race
 concurrency:
@@ -67,6 +68,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: test
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      alpine: ${{ steps.plan.outputs.alpine }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -109,7 +113,26 @@ jobs:
       - name: Build template (podman)
         env:
           PXMXFW_VERSION: ${{ steps.plan.outputs.tag }}
-        run: ./build.sh --podman -o out
+        run: |
+          ./build.sh --podman -o out
+          ls -l out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pxmxfw-template
+          path: out/*.tar.gz
+          if-no-files-found: error
+
+  # Boots nothing: checks the generated config and drives the web UI API
+  # inside the unpacked template with chroot.
+  test-template:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pxmxfw-template
+          path: out
 
       - name: Check config inside the template
         run: |
@@ -118,22 +141,6 @@ jobs:
           sudo mount --bind /dev /tmp/fw/dev
           sudo chroot /tmp/fw nft -c -f /etc/nftables.nft
           sudo chroot /tmp/fw dnsmasq --test
-          ls -l out/
-
-      # Report only: known CVEs with a fix in Alpine or Go. Rebuilding picks
-      # up fixed Alpine packages; the weekly run does that for edge.
-      - name: CVE scan (Trivy)
-        run: |
-          sudo podman run --rm -v /tmp/fw:/fw:ro "docker.io/aquasec/trivy:$TRIVY_VERSION" \
-            rootfs --quiet --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL \
-            --exit-code 3 /fw > trivy.txt || rc=$?
-          cat trivy.txt
-          case ${rc:-0} in
-            0) echo "Trivy: no fixable HIGH or CRITICAL CVEs" >> "$GITHUB_STEP_SUMMARY" ;;
-            3) echo "::warning::Trivy found fixable HIGH or CRITICAL CVEs in the template"
-               { echo '```'; cat trivy.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY" ;;
-            *) exit "$rc" ;;
-          esac
 
       - name: Check the web UI login inside the template
         run: |
@@ -173,61 +180,131 @@ jobs:
           sudo umount /tmp/fw/proc /tmp/fw/dev
           cat webui.log
 
-      - uses: actions/upload-artifact@v4
+  # Report only: known CVEs with a fix in Alpine or Go. Rebuilding picks up
+  # fixed Alpine packages; the weekly run does that for edge.
+  security:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
         with:
           name: pxmxfw-template
-          path: out/*.tar.gz
-          if-no-files-found: error
+          path: out
 
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: CVE scan (Trivy)
         run: |
-          cd out
-          alpine=$(ls alpine-*-pxmxfw-*_amd64.tar.gz | sed 's/^alpine-\([0-9.]*\)-pxmxfw-.*/\1/')
-          case $GITHUB_REF_NAME in
-            *+alpine*) [ "${GITHUB_REF_NAME##*+alpine}" = "$alpine" ] ||
-              { echo "::error::tag says Alpine ${GITHUB_REF_NAME##*+alpine}, built on $alpine"; exit 1; } ;;
+          sudo mkdir /tmp/fw
+          sudo tar -xzf out/*.tar.gz -C /tmp/fw
+          sudo podman run --rm -v /tmp/fw:/fw:ro "docker.io/aquasec/trivy:$TRIVY_VERSION" \
+            rootfs --quiet --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL \
+            --exit-code 3 /fw > trivy.txt || rc=$?
+          cat trivy.txt
+          case ${rc:-0} in
+            0) echo "Trivy: no fixable HIGH or CRITICAL CVEs" >> "$GITHUB_STEP_SUMMARY" ;;
+            3) echo "::warning::Trivy found fixable HIGH or CRITICAL CVEs in the template"
+               { echo '```'; cat trivy.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY" ;;
+            *) exit "$rc" ;;
           esac
-          # Fixed name so releases/latest/download/pxmxfw_amd64.tar.gz always works
-          cp alpine-*-pxmxfw-*_amd64.tar.gz pxmxfw_amd64.tar.gz
-          sha256sum *.tar.gz > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" *.tar.gz SHA256SUMS --title "$GITHUB_REF_NAME" \
-            --notes "Built on Alpine $alpine." --generate-notes
 
-      # Every merge to main and the weekly run replace the "edge"
-      # prerelease, so the newest build has a fixed URL Proxmox can download
-      # (workflow artifacts are zipped and need a GitHub login):
-      # releases/download/edge/pxmxfw_amd64.tar.gz
-      - name: Update the edge prerelease
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+  # GitHub releases (edge and v*) and container images on ghcr.io.
+  # Proxmox downloads the template by URL:
+  #   releases/latest/download/pxmxfw_amd64.tar.gz (newest v* release)
+  #   releases/download/edge/pxmxfw_amd64.tar.gz (newest main build)
+  # or pulls the same root filesystem as an OCI image:
+  #   ghcr.io/rumblebump/pxmxfw:latest, :edge, :0.1.0-alpine3.22.6
+  release:
+    runs-on: ubuntu-latest
+    needs: [build, test-template, security]
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pxmxfw-template
+          path: out
+
+      - name: Pick what to publish
+        id: what
         env:
-          GH_TOKEN: ${{ github.token }}
+          PLANNED_TAG: ${{ needs.build.outputs.tag }}
+          PLANNED_ALPINE: ${{ needs.build.outputs.alpine }}
         run: |
           cd out
           alpine=$(ls alpine-*-pxmxfw-*_amd64.tar.gz | sed 's/^alpine-\([0-9.]*\)-pxmxfw-.*/\1/')
+          echo "alpine=$alpine" >> "$GITHUB_OUTPUT"
+          tag=
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag=$GITHUB_REF_NAME
+            case $tag in
+              *+alpine*) [ "${tag##*+alpine}" = "$alpine" ] ||
+                { echo "::error::tag says Alpine ${tag##*+alpine}, built on $alpine"; exit 1; } ;;
+            esac
+          else
+            echo "edge=yes" >> "$GITHUB_OUTPUT"
+            if [ -n "$PLANNED_TAG" ]; then
+              if [ "$alpine" = "$PLANNED_ALPINE" ]; then
+                tag=$PLANNED_TAG
+              else
+                echo "::warning::built on Alpine $alpine, expected $PLANNED_ALPINE; no release this time"
+              fi
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # Fixed name so the download URLs above never change
           cp alpine-*-pxmxfw-*_amd64.tar.gz pxmxfw_amd64.tar.gz
+
+      # Every merge to main and the weekly run replace the "edge" prerelease
+      - name: GitHub release (edge)
+        if: steps.what.outputs.edge == 'yes'
+        env:
+          ALPINE: ${{ steps.what.outputs.alpine }}
+        run: |
+          cd out
           sha256sum pxmxfw_amd64.tar.gz > SHA256SUMS
           gh release delete edge --cleanup-tag --yes 2>/dev/null || true
           gh release create edge pxmxfw_amd64.tar.gz SHA256SUMS --prerelease --latest=false \
             --target "$GITHUB_SHA" --title "edge (latest main)" \
-            --notes "Built from ${GITHUB_SHA::7} on main with Alpine $alpine. Not a release; use a v* release for production."
+            --notes "Built from ${GITHUB_SHA::7} on main with Alpine $ALPINE. Not a release; use a v* release for production."
 
-      - name: Release (new Alpine version, or manual)
-        if: steps.plan.outputs.tag != ''
+      - name: GitHub release (version)
+        if: steps.what.outputs.tag != ''
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.plan.outputs.tag }}
-          PLANNED: ${{ steps.plan.outputs.alpine }}
+          TAG: ${{ steps.what.outputs.tag }}
+          ALPINE: ${{ steps.what.outputs.alpine }}
         run: |
           cd out
-          alpine=$(ls alpine-*-pxmxfw-*_amd64.tar.gz | sed 's/^alpine-\([0-9.]*\)-pxmxfw-.*/\1/')
-          if [ "$alpine" != "$PLANNED" ]; then
-            echo "::warning::built on Alpine $alpine, expected $PLANNED; no release this time"
-            exit 0
-          fi
           sha256sum *.tar.gz > SHA256SUMS
           gh release create "$TAG" *.tar.gz SHA256SUMS --target "$GITHUB_SHA" --title "$TAG" \
-            --notes "Built on Alpine $alpine." --generate-notes
+            --notes "Built on Alpine $ALPINE." --generate-notes
           echo "Released $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Container image (ghcr.io)
+        env:
+          TAG: ${{ steps.what.outputs.tag }}
+          EDGE: ${{ steps.what.outputs.edge }}
+        run: |
+          image=ghcr.io/${GITHUB_REPOSITORY,,}
+          tags=
+          [ "$EDGE" != yes ] || tags=edge
+          # OCI tags cannot hold "+": v0.1.0+alpine3.22.6 -> 0.1.0-alpine3.22.6
+          [ -z "$TAG" ] || tags="$tags ${TAG#v} latest"
+          tags=${tags//+/-}
+          [ -n "${tags// }" ] || exit 0
+          echo "$GH_TOKEN" | sudo podman login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          sudo podman import \
+            --change 'CMD ["/sbin/init"]' \
+            --change "LABEL org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --change "LABEL org.opencontainers.image.description=pxmxfw firewall for Proxmox LXC" \
+            out/pxmxfw_amd64.tar.gz "$image:build"
+          for t in $tags; do
+            sudo podman tag "$image:build" "$image:$t"
+            sudo podman push "$image:$t"
+            echo "Pushed $image:$t" >> "$GITHUB_STEP_SUMMARY"
+          done

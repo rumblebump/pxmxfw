@@ -22,17 +22,30 @@ The newest build of `main` (for testing, not a release) is always at
 `https://github.com/rumblebump/pxmxfw/releases/download/edge/pxmxfw_amd64.tar.gz`.
 The zipped files under a workflow run's *Artifacts* need a GitHub login, so
 Proxmox cannot download those.
-Edge is also rebuilt every Monday with fresh Alpine packages. Releases are
-tagged `v<pxmxfw version>+alpine<Alpine version>`, e.g. `v0.1.0+alpine3.22.6`.
-When a build of `main` (weekly or after a merge) lands on a newer Alpine than
-the last release, it publishes the next patch version automatically, e.g.
-`v0.1.1+alpine3.22.7`. For pxmxfw changes, run *Build template* on `main` from the Actions tab
-with a higher version in *release* (e.g. `0.2.0`), or push such a tag.
-Every build scans the template with [Trivy](https://trivy.dev) and lists known
-CVEs that have a fix in the run summary. [Renovate](https://docs.renovatebot.com)
-(`renovate.json`) opens PRs for Go modules, GitHub Actions and Trivy, and merges
-new Alpine branches (e.g. 3.23) on its own once CI passes; it needs the Renovate
-GitHub App installed on the repository.
+The same root filesystem is also on ghcr.io as an OCI image, for Proxmox
+versions that create containers from OCI images:
+`ghcr.io/rumblebump/pxmxfw:latest`, `:edge`, or a version such as
+`:0.1.0-alpine3.22.6`.
+
+## Releases and CI
+
+The *CI* workflow runs in stages: **test** (Go, shellcheck, rule tests),
+**build** (the template), then **test-template** (config and web UI checks
+inside the built template) and **security** (a [Trivy](https://trivy.dev) scan
+that lists known CVEs with a fix in the run summary), and last **release**
+(GitHub releases and ghcr.io images; not for pull requests).
+
+Releases are tagged `v<pxmxfw version>+alpine<Alpine version>`, e.g.
+`v0.1.0+alpine3.22.6`. Edge is rebuilt after every merge and every Monday with
+fresh Alpine packages. When a build of `main` lands on a newer Alpine than the
+last release, it publishes the next patch version automatically, e.g.
+`v0.1.1+alpine3.22.7`. For pxmxfw changes, run *CI* on `main` from the Actions
+tab with a higher version in *release* (e.g. `0.2.0`), or push such a tag.
+
+[Renovate](https://docs.renovatebot.com) (`renovate.json`) opens PRs for Go
+modules, GitHub Actions and Trivy, and merges new Alpine branches (e.g. 3.23)
+on its own once CI passes; it needs the Renovate GitHub App installed on the
+repository.
 
 ## Build the template
 
