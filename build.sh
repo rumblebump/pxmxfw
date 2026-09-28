@@ -121,8 +121,11 @@ else
 fi
 : > "$ROOT/etc/resolv.conf"   # Proxmox writes this on container start
 
-# Build the web UI server against Alpine's musl, PAM and SQLite
-GOBUILD='cd "$1" && CGO_ENABLED=1 GOFLAGS=-mod=readonly go build -tags libsqlite3 -trimpath -ldflags "-s -w" -o "$2" .'
+# Build the web UI server against Alpine's musl, PAM and SQLite.
+# Alpine's go only bootstraps: GOTOOLCHAIN=auto fetches the (checksummed)
+# Go release named by `toolchain` in webui/go.mod, so the binary gets
+# current Go security fixes without waiting for a new Alpine branch.
+GOBUILD='cd "$1" && CGO_ENABLED=1 GOTOOLCHAIN=auto GOFLAGS=-mod=readonly go build -tags libsqlite3 -trimpath -ldflags "-s -w" -o "$2" .'
 echo ">> Building pxmxfw-webui"
 if [ -f /etc/alpine-release ]; then
 	apk add --no-cache $BUILD_DEPS >/dev/null
