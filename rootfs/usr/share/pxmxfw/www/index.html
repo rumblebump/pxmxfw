@@ -99,7 +99,7 @@
 			<b>DHCP &amp; DNS</b> sets the address range, lease time, DNS servers and fixed addresses of an interface.
 		</p>
 		<table class="ifaces">
-			<thead><tr><th>Interface</th><th>IPv4</th><th x-show="ipv6()">IPv6</th><th>DHCP</th><th>Comment</th><th></th></tr></thead>
+			<thead><tr><th>Interface</th><th>IPv4</th><th x-show="ipv6()">IPv6</th><th>Routing</th><th>DHCP &amp; DNS</th><th>Comment</th><th></th></tr></thead>
 			<template x-for="r in ifaces" :key="r.name">
 				<tbody>
 				<tr>
@@ -126,6 +126,14 @@
 						</div>
 					</td>
 					<td>
+						<span x-show="r.name === wan()">routed</span>
+						<select x-show="inside(r)" :value="r.routing" @change="setRouting(r, $event.target.value)">
+							<option value="yes" :selected="r.routing === 'yes'">routed</option>
+							<option value="no" :selected="r.routing === 'no'">not routed</option>
+						</select>
+						<div class="hint" x-show="inside(r) && r.routing === 'no'">only this firewall and port forwards</div>
+					</td>
+					<td>
 						<div x-show="inside(r)">
 							<span x-text="dhcpSummary(r)"></span>
 							<div><button class="link" @click="r.open = !r.open" x-text="r.open ? 'Hide' : 'DHCP & DNS'"></button></div>
@@ -135,18 +143,25 @@
 					<td><button class="link" x-show="r.type" @click="removeIface(r)">Remove</button></td>
 				</tr>
 				<tr x-show="r.open && inside(r)" class="detail">
-					<td :colspan="ipv6() ? 6 : 5">
+					<td :colspan="ipv6() ? 7 : 6">
 						<div class="form">
 							<label class="check"><input type="checkbox" :checked="!!(r.dhcpStart || r.dhcpEnd)" @change="toggleDhcp(r, $event)"> Hand out addresses (DHCP)</label>
+							<label class="check"><input type="checkbox" :checked="accessHas(r.name, 'dns') || accessImplied(r.name, 'dns')" :disabled="accessImplied(r.name, 'dns')"
+								@change="toggleAccess(r.name, 'dns', $event)"> Answer DNS queries here<span class="muted" x-show="accessImplied(r.name, 'dns')">&nbsp;(on with DHCP)</span></label>
 						</div>
+						<p class="hint" x-show="r.routing === 'no'">Not routed: clients get no default route and only reach this firewall (its DNS, if on) and port forwards to its address here.</p>
 						<div class="form" x-show="r.dhcpStart || r.dhcpEnd">
 							<label>First address <input x-model="r.dhcpStart" :placeholder="rangeHint(r, 100)"></label>
 							<label>Last address <input x-model="r.dhcpEnd" :placeholder="rangeHint(r, 200)"></label>
 							<label>Lease time <input x-model="r.lease" :placeholder="`${settings.DHCP_LEASE || '12h'} (default)`"></label>
 							<label>DNS servers handed out <input x-model="r.dns" placeholder="this firewall (default), or 1.1.1.1,9.9.9.9"></label>
-							<label>Gateway handed out
+							<label x-show="r.routing !== 'no'">Gateway handed out
 								<select x-model="r.gwMode"><option value="">this firewall</option><option value="ip">another address</option><option value="none">none (no default route)</option></select>
 								<input x-show="r.gwMode === 'ip'" x-model="r.gateway" placeholder="10.20.1.254">
+							</label>
+							<label x-show="r.routing !== 'no'">Routes handed out (through this firewall)
+								<input x-model="r.routes" placeholder="optional, e.g. 192.168.10.0/24, 10.20.0.0/16">
+								<button type="button" class="link" @click="r.routes = routedNets(r).join(', ')" x-show="routedNets(r).length">Use the other routed networks</button>
 							</label>
 						</div>
 						<h3>Fixed addresses and names in <span x-text="subnetOf(r) || 'this subnet'"></span></h3>

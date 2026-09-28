@@ -91,6 +91,13 @@ expect_invalid interfaces "$(printf '%s\neth2 dns=dns.example' "$I2")"
 expect_invalid interfaces "$(printf '%s\neth2 gateway=10.0.2.300' "$I2")"
 expect_invalid interfaces 'eth0 lease=1h'
 expect_invalid interfaces 'eth0 type=bridge'
+expect_valid interfaces "$(printf '%s\neth2 addr=10.0.2.1/24 routing=no dhcp=10.0.2.100-10.0.2.200' "$I2")"
+expect_valid interfaces "$(printf '%s\neth2 addr=10.0.2.1/24 dhcp=10.0.2.100-10.0.2.200 gateway=none routes=192.168.10.0/24,10.20.0.0/16' "$I2")"
+expect_invalid interfaces "$(printf '%s\neth2 routing=maybe' "$I2")"
+expect_invalid interfaces "$(printf '%s\neth2 addr=10.0.2.1/24 routes=192.168.10.0/24' "$I2")"                       # routes need dhcp
+expect_invalid interfaces "$(printf '%s\neth2 routing=no dhcp=10.0.2.100-10.0.2.200 routes=192.168.10.0/24' "$I2")"  # nothing is routed
+expect_invalid interfaces "$(printf '%s\neth2 dhcp=10.0.2.100-10.0.2.200 routes=192.168.10.1' "$I2")"
+expect_invalid interfaces 'eth0 routing=no'
 expect_invalid settings 'NAT=yes'   # now a masquerade rule
 expect_valid settings 'WAN=ens18'
 expect_valid settings 'OUTPUT_POLICY=drop'
@@ -219,6 +226,19 @@ printf 'eth0\n' > "$T/etc/interfaces"
 printf 'forward accept in=eth1 out=eth0\n' > "$T/etc/rules"
 PXMXFW_ETC=$T/etc "$PXMXFW" render nft > /dev/null 2>&1 && bad "rule with an unlisted interface accepted by apply" || ok
 
+# routing=no: nothing routed from or to it, apart from port forwards
+fresh_etc "$T/etc"
+printf 'eth0\neth1\neth2 addr=10.0.2.1/24 routing=no\n' > "$T/etc/interfaces"
+printf 'input accept in=eth2 service=dns\ndnat in=eth2 proto=tcp dport=80 dst=10.0.2.1 to=192.168.10.10\nforward accept in=eth1 out=eth0\n' >> "$T/etc/rules"
+check_ruleset noroute
+grep -q 'iifname { "eth2" } drop comment "routing off"' "$T/noroute.nft" && grep -q 'oifname { "eth2" } drop comment "routing off"' "$T/noroute.nft" &&
+	[ "$(grep -n 'routing off' "$T/noroute.nft" | head -n1 | cut -d: -f1)" -gt "$(grep -n 'ct status dnat accept' "$T/noroute.nft" | cut -d: -f1)" ] &&
+	[ "$(grep -n 'routing off' "$T/noroute.nft" | tail -n1 | cut -d: -f1)" -lt "$(grep -n 'LAN to WAN' "$T/noroute.nft" | cut -d: -f1)" ] &&
+	ok || bad "routing=no drops routed traffic before the rules, after port forwards"
+grep -q 'iifname { "eth2" } ip daddr 10.0.2.1 tcp dport 80 dnat ip to 192.168.10.10' "$T/noroute.nft" && ok || bad "port forward from a not routed interface"
+printf 'forward accept in=eth2 out=eth0\n' >> "$T/etc/rules"
+PXMXFW_ETC=$T/etc "$PXMXFW" render nft > /dev/null 2>&1 && bad "forward rule for a routing=no interface accepted" || ok
+
 # ---- dnsmasq ------------------------------------------------------------------
 
 fresh_etc "$T/etc"
@@ -242,6 +262,14 @@ grep -qx 'dhcp-option=tag:eth1,option:router' "$T/dnsmasq2.conf" && ok || bad "g
 if command -v dnsmasq >/dev/null; then
 	dnsmasq --test -C "$T/dnsmasq2.conf" >/dev/null 2>&1 && ok || bad "dnsmasq --test per-interface options: $(dnsmasq --test -C "$T/dnsmasq2.conf" 2>&1)"
 fi
+printf 'eth0\neth1 dhcp=192.168.10.100-192.168.10.200 addr=192.168.10.1/24 gateway=none routes=10.0.2.0/24,10.20.0.0/16\neth2 addr=10.0.2.1/24 routing=no dhcp=10.0.2.100-10.0.2.200\neth3 addr=10.0.3.1/24 dhcp=10.0.3.100-10.0.3.200 routes=10.0.2.0/24\n' > "$T/etc/interfaces"
+PXMXFW_ETC=$T/etc "$PXMXFW" render dnsmasq > "$T/dnsmasq4.conf" 2>&1
+grep -qx 'dhcp-option=tag:eth1,option:classless-static-route,10.0.2.0/24,192.168.10.1,10.20.0.0/16,192.168.10.1' "$T/dnsmasq4.conf" && ok || bad "routes handed out: $(cat "$T/dnsmasq4.conf")"
+grep -qx 'dhcp-option=tag:eth2,option:router' "$T/dnsmasq4.conf" && ! grep -q 'tag:eth2,option:classless' "$T/dnsmasq4.conf" && ok || bad "routing=no hands out no default route"
+grep -qx 'dhcp-option=tag:eth3,option:classless-static-route,10.0.2.0/24,10.0.3.1,0.0.0.0/0,10.0.3.1' "$T/dnsmasq4.conf" && ok || bad "routes include the default route"
+if command -v dnsmasq >/dev/null; then
+	dnsmasq --test -C "$T/dnsmasq4.conf" >/dev/null 2>&1 && ok || bad "dnsmasq --test routes: $(dnsmasq --test -C "$T/dnsmasq4.conf" 2>&1)"
+fi
 printf 'eth0\neth1\n' > "$T/etc/interfaces"
 PXMXFW_ETC=$T/etc "$PXMXFW" render dnsmasq > /dev/null 2>&1 && bad "DNSMASQ=yes with no dns interface accepted" || ok
 printf 'input accept service=dns\n' > "$T/etc/rules"
@@ -254,6 +282,12 @@ grep -qx 'dhcp-range=::,constructor:eth1,ra-stateless,ra-names' "$T/dnsmasq.conf
 	ok || bad "IPv6 router advertisements where addr6 is not none"
 if command -v dnsmasq >/dev/null; then
 	dnsmasq --test -C "$T/dnsmasq.conf" >/dev/null 2>&1 && ok || bad "dnsmasq --test: $(dnsmasq --test -C "$T/dnsmasq.conf" 2>&1)"
+fi
+printf 'eth0\neth1 dhcp=192.168.10.100-192.168.10.200 routing=no\n' > "$T/etc/interfaces"
+PXMXFW_ETC=$T/etc "$PXMXFW" render dnsmasq > "$T/dnsmasq5.conf"
+grep -qx 'ra-param=eth1,60,0' "$T/dnsmasq5.conf" && ok || bad "routing=no: router advertisements are not a default route"
+if command -v dnsmasq >/dev/null; then
+	dnsmasq --test -C "$T/dnsmasq5.conf" >/dev/null 2>&1 && ok || bad "dnsmasq --test ra-param: $(dnsmasq --test -C "$T/dnsmasq5.conf" 2>&1)"
 fi
 printf 'eth0\n' > "$T/etc/interfaces"
 printf '' > "$T/etc/rules"

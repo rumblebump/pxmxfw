@@ -152,34 +152,41 @@ settings_write() { # write current settings to stdout
 
 # ---- interfaces -------------------------------------------------------------
 # One line per network interface:
-#   IFACE [addr=A] [addr6=A] [dhcp=START-END] [lease=TIME] [dns=IP,IP]
-#         [gateway=IP|none]
+#   IFACE [addr=A] [addr6=A] [routing=yes|no] [dhcp=START-END] [lease=TIME]
+#         [dns=IP,IP] [gateway=IP|none] [routes=NET,NET]
 #         [type=vlan link=IFACE vid=N | type=bridge [ports=IFACE,IFACE]] [# comment]
 # Interfaces have no role: what may pass is set in the rules file. The WAN
 # (WAN= in pxmxfw.conf, eth0 by default) only differs in that Proxmox always
 # sets its addresses and it never runs a DHCP server.
 # addr:  proxmox (default: Proxmox sets it), none, or IPv4/prefix set by pxmxfw
 # addr6: same for IPv6, used only when IPV6=yes
+# routing: yes (default): traffic from and to this interface is routed as the
+#        forward rules allow. no: nothing is routed from or to it; its clients
+#        only reach the firewall itself (as input rules allow) and port
+#        forwards (dnat), and DHCP hands out no default route
 # dhcp:  IPv4 range dnsmasq hands out on this interface (also lets DHCP and
 #        DNS from this interface reach the firewall)
 # lease: DHCP lease time on this interface (default: DHCP_LEASE)
 # dns:   DNS servers DHCP hands out here (default: the firewall itself)
-# gateway: default route DHCP hands out here (default: the firewall itself;
-#        none: clients get no default route)
+# gateway: default route DHCP hands out here (default: the firewall itself,
+#        none with routing=no; none: clients get no default route)
+# routes: networks DHCP tells clients to reach through the firewall (DHCP
+#        option 121), for example other LANs when gateway=none
 # type:  vlan    created by pxmxfw on top of link, with 802.1Q id vid
 #        bridge  created by pxmxfw, joining ports (which carry no address)
 #        without type, a NIC from Proxmox or a WireGuard tunnel
 
 # ifaces_each FILE CALLBACK: validate the interfaces file and call CALLBACK
-# with: name addr addr6 dhcp comment type link vid ports lease dns gateway.
-# With CALLBACK "-" only validates. Needs the settings (WAN) loaded. Sets
-# IF_NAMES (every interface), WAN_IF, DHCP_IFS (with a dhcp= range),
+# with: name addr addr6 dhcp comment type link vid ports lease dns gateway
+# routing routes. With CALLBACK "-" only validates. Needs the settings (WAN)
+# loaded. Sets IF_NAMES (every interface), WAN_IF, DHCP_IFS (with a dhcp= range),
+# NOROUTE_IFS (routing=no),
 # VLANS ("name:link:vid ..."), BRIDGES ("name:p1,p2 ...") and PORT_IFS
 # (bridge ports).
 ifaces_each() {
 	_f=$1 _cb=$2
 	_errors=0
-	WAN_IF='' IF_NAMES='' DHCP_IFS='' VLANS='' BRIDGES='' PORT_IFS='' _addrd=''
+	WAN_IF='' IF_NAMES='' DHCP_IFS='' NOROUTE_IFS='' VLANS='' BRIDGES='' PORT_IFS='' _addrd=''
 	_seen=' '
 	[ -r "$_f" ] || { err "$_f" 0 "missing"; return 1; }
 	_n=0
@@ -197,7 +204,7 @@ ifaces_each() {
 		case $_seen in *" $_name "*) err "$_f" "$_n" "$_name listed twice"; continue ;; esac
 		_seen="$_seen$_name "
 		_addr=proxmox _addr6=proxmox _dhcp='' _bad='' _type='' _link='' _vid='' _ports=''
-		_lease='' _dns='' _gw=''
+		_lease='' _dns='' _gw='' _routing=yes _routes=''
 		for _kv; do
 			case $_kv in
 				lease=*) is_lease "${_kv#lease=}" && _lease=${_kv#lease=} || _bad="lease: e.g. 12h, 30m, 1d or infinite" ;;
@@ -205,6 +212,11 @@ ifaces_each() {
 					_dns=${_kv#dns=}
 					for _d in $(echo "$_dns" | tr ',' ' '); do is_ipv4 "$_d" || _bad="dns: IPv4 addresses separated by commas"; done
 					case $_dns in ''|,*|*,|*,,*) _bad="dns: IPv4 addresses separated by commas" ;; esac ;;
+				routing=yes|routing=no) _routing=${_kv#routing=} ;;
+				routes=*)
+					_routes=${_kv#routes=}
+					for _d in $(echo "$_routes" | tr ',' ' '); do is_ipv4_cidr "$_d" || _bad="routes: IPv4 networks (ADDR/PREFIX) separated by commas"; done
+					case $_routes in ''|,*|*,|*,,*) _bad="routes: IPv4 networks (ADDR/PREFIX) separated by commas" ;; esac ;;
 				gateway=none) _gw=none ;;
 				gateway=*) is_ipv4 "${_kv#gateway=}" && _gw=${_kv#gateway=} || _bad="gateway: an IPv4 address or none" ;;
 				type=vlan|type=bridge) _type=${_kv#type=} ;;
@@ -227,7 +239,8 @@ ifaces_each() {
 		done
 		if [ -z "$_bad" ] && [ "$_name" = "$WAN" ]; then
 			[ "$_addr" = proxmox ] && [ "$_addr6" = proxmox ] || _bad="the WAN address is set in Proxmox (addr=proxmox)"
-			[ -z "$_dhcp$_lease$_dns$_gw" ] || _bad="no DHCP server on WAN"
+			[ -z "$_dhcp$_lease$_dns$_gw$_routes" ] || _bad="no DHCP server on WAN"
+			[ "$_routing" = yes ] || _bad="the WAN is always routed"
 			[ -z "$_type" ] || _bad="the WAN is a NIC from Proxmox"
 		fi
 		if [ -z "$_bad" ]; then
@@ -236,6 +249,8 @@ ifaces_each() {
 				*) [ -z "$_link$_vid" ] || _bad="link= and vid= are only for type=vlan" ;;
 			esac
 			[ -z "$_ports" ] || [ "$_type" = bridge ] || _bad="ports= is only for type=bridge"
+			[ -z "$_routes" ] || [ "$_routing" = yes ] || _bad="routes= needs routing (no routes lead out of an interface with routing=no)"
+			[ -z "$_routes" ] || [ -n "$_dhcp" ] || _bad="routes= is handed out by DHCP, so it needs dhcp="
 			[ "$_link" != "$_name" ] || _bad="a VLAN cannot be on itself"
 			case ,$_ports, in *,"$_name",*) _bad="a bridge cannot be its own port" ;; esac
 		fi
@@ -243,14 +258,15 @@ ifaces_each() {
 		IF_NAMES="$IF_NAMES $_name"
 		[ "$_name" != "$WAN" ] || WAN_IF=$_name
 		[ -z "$_dhcp" ] || DHCP_IFS="$DHCP_IFS $_name"
+		[ "$_routing" = yes ] || NOROUTE_IFS="$NOROUTE_IFS $_name"
 		case $_addr in proxmox|none) ;; *) _addrd="$_addrd $_name" ;; esac
 		case $_type in
 			vlan) VLANS="$VLANS $_name:$_link:$_vid" ;;
 			bridge) BRIDGES="$BRIDGES $_name:$_ports"; PORT_IFS="$PORT_IFS $(echo "$_ports" | tr ',' ' ')" ;;
 		esac
-		[ "$_cb" = - ] || "$_cb" "$_name" "$_addr" "$_addr6" "$_dhcp" "$_c" "$_type" "$_link" "$_vid" "$_ports" "$_lease" "$_dns" "$_gw"
+		[ "$_cb" = - ] || "$_cb" "$_name" "$_addr" "$_addr6" "$_dhcp" "$_c" "$_type" "$_link" "$_vid" "$_ports" "$_lease" "$_dns" "$_gw" "$_routing" "$_routes"
 	done < "$_f"
-	IF_NAMES=${IF_NAMES# } DHCP_IFS=${DHCP_IFS# } VLANS=${VLANS# } BRIDGES=${BRIDGES# } PORT_IFS=${PORT_IFS# }
+	IF_NAMES=${IF_NAMES# } DHCP_IFS=${DHCP_IFS# } NOROUTE_IFS=${NOROUTE_IFS# } VLANS=${VLANS# } BRIDGES=${BRIDGES# } PORT_IFS=${PORT_IFS# }
 	[ "$_errors" -gt 0 ] || ifaces_links "$_f"
 	[ -n "$WAN_IF" ] || [ "$_errors" -gt 0 ] || err "$_f" 0 "the WAN $WAN (WAN= in pxmxfw.conf) is not listed"
 	[ "$_errors" -eq 0 ]
@@ -295,6 +311,8 @@ ifaces_links() {
 #   service=ping,ssh,dns,dhcp,webui  services of the firewall (input only,
 #                 instead of proto and ports)
 # Input and forward drop what no rule accepts, output uses OUTPUT_POLICY.
+# Interfaces with routing=no are never routed (forward rules cannot name
+# them), apart from dnat port forwards.
 # Replies to allowed traffic, loopback, ICMPv6, the WireGuard ports, and DHCP
 # and DNS on interfaces with a dhcp= range are always allowed. With IPV6=no
 # nothing is routed over IPv6. A dnat rule is also let through forward.
@@ -410,7 +428,12 @@ fw_each() {
 			esac
 		fi
 		if [ -z "$_bad" ] && [ -n "$IF_NAMES" ]; then
-			for _i in $(echo "$_in,$_out" | tr ',' ' '); do listed "$_i" || _bad="$_i is not in the interfaces file"; done
+			for _i in $(echo "$_in,$_out" | tr ',' ' '); do
+				listed "$_i" || _bad="$_i is not in the interfaces file"
+				case $_kind:" $NOROUTE_IFS " in forward:*" $_i "*|masquerade:*" $_i "*)
+					_bad="$_i has routing=no, so nothing is routed from or to it (use a dnat rule for port forwards)" ;;
+				esac
+			done
 		fi
 		[ -z "$_bad" ] || { err "$_f" "$_n" "$_bad"; continue; }
 		if [ "$_kind:$_act" = input:accept ] && [ -n "$_svc" ]; then
@@ -758,6 +781,10 @@ render_nft() {
 	l 2 "ct state invalid drop"
 	[ "$IPV6" = yes ] || l 2 "meta nfproto ipv6 drop comment \"IPv6 routing is off\""
 	l 2 "ct status dnat accept comment \"port forwards\""
+	if [ -n "$NOROUTE_IFS" ]; then
+		l 2 "iifname $(nft_set "$NOROUTE_IFS") drop comment \"routing off\""
+		l 2 "oifname $(nft_set "$NOROUTE_IFS") drop comment \"routing off\""
+	fi
 	_chain=forward
 	fw_each "$_rules" _r_filter
 	l 1 "}"
@@ -793,20 +820,45 @@ _d_host() { # ip name mac comment
 	printf 'host-record=%s,%s\n' "$2" "$1"
 	case $3 in *:*) printf 'dhcp-host=%s,%s,%s\n' "$3" "$1" "$2" ;; esac
 }
-_d_iface() { # name addr addr6 dhcp comment type link vid ports lease dns gateway
+_d_iface() { # name addr addr6 dhcp comment type link vid ports lease dns gateway routing routes
 	case " $DNSMASQ_IFS " in *" $1 "*) ;; *) return 0 ;; esac
 	echo "interface=$1"
 	if [ -n "$4" ]; then
 		echo "dhcp-range=set:$1,${4%-*},${4#*-},${10:-$DHCP_LEASE}"
 		[ -z "${11}" ] || echo "dhcp-option=tag:$1,option:dns-server,${11}"
-		case ${12} in
+		_dg=${12}
+		# without routing, clients get no default route unless another router is named
+		[ -n "$_dg" ] || [ "${13}" = yes ] || _dg=none
+		case $_dg in
 			'') ;;
 			none) echo "dhcp-option=tag:$1,option:router" ;;
-			*) echo "dhcp-option=tag:$1,option:router,${12}" ;;
+			*) echo "dhcp-option=tag:$1,option:router,$_dg" ;;
 		esac
+		if [ -n "${14}" ]; then
+			# Option 121: clients that take it ignore the router option, so
+			# the default route goes in too. The firewall's own address on
+			# this interface is the next hop.
+			_me=''
+			case $2 in proxmox) _me=$(proxmox_address "$1" || true) ;; none) ;; *) _me=$2 ;; esac
+			_me=${_me%/*}
+			if [ -z "$_me" ]; then
+				echo "pxmxfw: $1: routes= needs an address on $1 that pxmxfw knows (addr=IP/PREFIX, or a static one from Proxmox)" >&2
+			else
+				_dr=''
+				for _rn in $(echo "${14}" | tr ',' ' '); do _dr="$_dr,$_rn,$_me"; done
+				case $_dg in
+					none) ;;
+					'') _dr="$_dr,0.0.0.0/0,$_me" ;;
+					*) _dr="$_dr,0.0.0.0/0,$_dg" ;;
+				esac
+				echo "dhcp-option=tag:$1,option:classless-static-route${_dr}"
+			fi
+		fi
 	fi
 	if [ "$IPV6" = yes ] && [ "$3" != none ]; then
 		echo "dhcp-range=::,constructor:$1,ra-stateless,ra-names"
+		# router lifetime 0: not a default router when nothing is routed
+		[ "${13}" = yes ] || echo "ra-param=$1,60,0"
 	fi
 }
 

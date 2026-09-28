@@ -176,6 +176,7 @@ function parseIface(line) {
 		lease: kv.lease || '', dns: kv.dns || '',
 		gwMode: kv.gateway === undefined ? '' : kv.gateway === 'none' ? 'none' : 'ip',
 		gateway: kv.gateway && kv.gateway !== 'none' ? kv.gateway : '',
+		routing: kv.routing === 'no' ? 'no' : 'yes', routes: (kv.routes || '').replaceAll(',', ', '),
 		open: false,
 		type: kv.type || '', link: kv.link || '', vid: kv.vid || '', ports: kv.ports || '',
 	};
@@ -185,12 +186,16 @@ function ifaceLine(r, wan) {
 	if (r.name !== wan) {
 		if (r.addrMode !== 'proxmox') f.push(`addr=${r.addrMode === 'static' ? r.addr.trim() : 'none'}`);
 		if (r.addr6Mode !== 'proxmox') f.push(`addr6=${r.addr6Mode === 'static' ? r.addr6.trim() : 'none'}`);
+		if (r.routing === 'no') f.push('routing=no');
 		if (r.dhcpStart.trim() || r.dhcpEnd.trim()) {
 			f.push(`dhcp=${r.dhcpStart.trim()}-${r.dhcpEnd.trim()}`);
 			if (r.lease.trim()) f.push(`lease=${r.lease.trim()}`);
 			if (r.dns.trim()) f.push(`dns=${r.dns.replace(/[\s,]+/g, ',').replace(/^,|,$/g, '')}`);
-			if (r.gwMode === 'none') f.push('gateway=none');
-			if (r.gwMode === 'ip' && r.gateway.trim()) f.push(`gateway=${r.gateway.trim()}`);
+			if (r.routing !== 'no') {
+				if (r.gwMode === 'none') f.push('gateway=none');
+				if (r.gwMode === 'ip' && r.gateway.trim()) f.push(`gateway=${r.gateway.trim()}`);
+				if (list(r.routes)) f.push(`routes=${list(r.routes)}`);
+			}
 		}
 		if (r.type === 'vlan') f.push('type=vlan', `link=${r.link}`, `vid=${String(r.vid).trim()}`);
 		if (r.type === 'bridge') f.push('type=bridge', ...(r.ports ? [`ports=${r.ports}`] : []));
@@ -278,7 +283,7 @@ function newIface(name, o = {}) {
 	return {
 		name, comment: '', addrMode: 'none', addr: '', addr6Mode: 'none', addr6: '',
 		dhcpStart: '', dhcpEnd: '', type: '', link: '', vid: '', ports: '',
-		lease: '', dns: '', gwMode: '', gateway: '', open: false, ...o,
+		lease: '', dns: '', gwMode: '', gateway: '', routing: 'yes', routes: '', open: false, ...o,
 	};
 }
 
@@ -860,6 +865,32 @@ document.addEventListener('alpine:init', () => {
 			return this.rules.some(r => r.kind === 'input' && r.action === 'accept' &&
 				(r.proto.split(':')[1] || '').split(',').includes('webui') &&
 				(!names || !r.in || list(r.in).split(',').some(i => names.includes(i))));
+		},
+		// Routing off: nothing is routed from or to R, so it leaves the forwarding
+		// and NAT rules. Routing on: it gets a rule to reach WAN if no rule routes it.
+		setRouting(r, v) {
+			r.routing = v;
+			const named = x => list(`${x.in},${x.out}`).split(',').includes(r.name);
+			if (v === 'no') {
+				const before = this.rules.length;
+				this.rules = this.rules.filter(x => !((x.kind === 'forward' || x.kind === 'masquerade') && named(x)) ||
+					!this.dropIface(x, r.name));
+				if (this.rules.length !== before) this.show('ok', `${r.name} is no longer routed; its forwarding rules were removed.`);
+			} else if (!this.rules.some(x => x.kind === 'forward' && named(x))) {
+				this.rules.push(newRule('forward', { in: r.name, out: this.wan(), comment: `${r.name} to WAN` }));
+				this.show('ok', `${r.name} is routed and got a rule to reach WAN; change it under Firewall.`);
+			}
+		},
+		// take NAME out of rule X; true when X names nothing else there (so it goes)
+		dropIface(x, name) {
+			const fix = v => list(v).split(',').filter(n => n && n !== name).join(',');
+			const inHad = list(x.in).split(',').includes(name), outHad = list(x.out).split(',').includes(name);
+			x.in = fix(x.in); x.out = fix(x.out);
+			return (inHad && !x.in) || (outHad && !x.out);
+		},
+		// subnets of the other routed interfaces, for routes handed out by DHCP
+		routedNets(r) {
+			return [...new Set(this.ifaces.filter(x => x !== r && x.routing !== 'no' && this.inside(x)).map(x => this.subnetOf(x)).filter(Boolean))];
 		},
 		// a new interface reaches WAN and answers ping, like the LAN at first boot
 		defaultRules(name) {

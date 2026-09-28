@@ -247,7 +247,7 @@ dnsmasq config. Nothing else needs editing.
 | File | Content |
 | --- | --- |
 | `pxmxfw.conf` | `KEY=value` settings: `WAN` (default `eth0`), `OUTPUT_POLICY` (`accept` or `drop`), `IPV6`, `WEBUI_PORT`, `DNSMASQ`, `DNS_UPSTREAM`, `DNS_DOMAIN`, `DHCP_LEASE` |
-| `interfaces` | `IFACE [addr=proxmox\|none\|IP/PREFIX] [addr6=...] [dhcp=START-END] [lease=TIME] [dns=IP,IP] [gateway=IP\|none] [type=vlan link=IFACE vid=N \| type=bridge ports=IFACE,...]` |
+| `interfaces` | `IFACE [addr=proxmox\|none\|IP/PREFIX] [addr6=...] [routing=yes\|no] [dhcp=START-END] [lease=TIME] [dns=IP,IP] [gateway=IP\|none] [routes=NET,NET] [type=vlan link=IFACE vid=N \| type=bridge ports=IFACE,...]` |
 | `rules` | firewall rules, see below |
 | `hosts` | `IP NAME [MAC]`: local DNS names, fixed DHCP leases with a MAC |
 | `wireguard` | `tunnel NAME port=PORT [public=HOST:PORT]` then `peer NAME key=PUBKEY allowed=CIDR[,CIDR] [endpoint=HOST:PORT] [keepalive=S]` |
@@ -257,6 +257,22 @@ Interfaces have no role: the `rules` file decides what passes. The WAN only
 differs in that Proxmox sets its address and it runs no DHCP server. VLANs
 and bridges are created by `pxmxfw apply` and removed again when their line
 is removed; a bridge's ports carry no address, and rules name the bridge.
+
+Each interface is either **routed** (the default) or **not routed**
+(`routing=no`):
+
+- Routed: forwarding rules decide where its traffic may go, and DHCP hands
+  out the firewall as gateway (or `gateway=`), its DNS servers (`dns=`,
+  the firewall by default) and, with `routes=`, routes to other networks
+  through the firewall (DHCP option 121, for example with `gateway=none`
+  so clients keep their own default route).
+- Not routed: nothing is routed from or to it, whatever the forwarding
+  rules say, and DHCP hands out no default route. Its clients only reach
+  the firewall itself (what the access grid or input rules allow, such as
+  DNS) and port forwards on the firewall's address there (`dnat
+  in=eth2 dst=10.0.2.1 proto=tcp dport=80 to=192.168.10.10`).
+
+DHCP and DNS can be turned on for every interface except the WAN.
 
 ### Firewall rules
 
