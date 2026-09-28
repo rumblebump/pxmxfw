@@ -92,6 +92,7 @@ err() {
 
 settings_defaults() {
 	WAN=eth0
+	FIREWALL=rules
 	OUTPUT_POLICY=accept
 	IPV6=no
 	WEBUI_PORT=8443
@@ -122,6 +123,7 @@ settings_load() {
 		case $_v in \"*\") _v=${_v#\"}; _v=${_v%\"} ;; esac
 		case $_k in
 			WAN) is_iface "$_v" && WAN=$_v || err "$_f" "$_n" "WAN: an interface name" ;;
+			FIREWALL) case $_v in rules|manual) FIREWALL=$_v ;; *) err "$_f" "$_n" "FIREWALL: rules or manual" ;; esac ;;
 			OUTPUT_POLICY) case $_v in accept|drop) OUTPUT_POLICY=$_v ;; *) err "$_f" "$_n" "OUTPUT_POLICY: accept or drop" ;; esac ;;
 			NAT|WAN_PING|WEBUI_WAN) err "$_f" "$_n" "$_k was replaced by the rules file (pxmxfw migrate converts it)" ;;
 			IPV6) is_yesno "$_v" && IPV6=$_v || err "$_f" "$_n" "IPV6: use yes or no" ;;
@@ -140,6 +142,7 @@ settings_write() { # write current settings to stdout
 	cat <<-EOF
 	# pxmxfw settings. Edit in the web UI or here, then run: pxmxfw apply
 	WAN=$WAN
+	FIREWALL=$FIREWALL
 	OUTPUT_POLICY=$OUTPUT_POLICY
 	IPV6=$IPV6
 	WEBUI_PORT=$WEBUI_PORT
@@ -305,12 +308,17 @@ ifaces_links() {
 # comma list; a missing one matches everything):
 #   in=IFACE      arrives on (not for output)
 #   out=IFACE     leaves through (not for input)
+#   ip=4|6        IPv4 or IPv6 only (implied by src and dst)
 #   src=NET dst=NET  IPv4 or IPv6 address or ADDR/PREFIX, one family per rule
-#   proto=tcp|udp|tcp,udp|icmp
+#   proto=tcp|udp|tcp,udp|icmp|icmpv6|gre|esp|ah|ipip
 #   sport=PORT[-PORT] dport=PORT[-PORT]  (need proto tcp and/or udp)
+#   tcpflags=FLAGS  (proto=tcp) flags of fin, syn, rst, psh, ack, urg:
+#                 syn|fin  any of them set; syn&!ack  syn set and ack not
 #   service=ping,ssh,dns,dhcp,webui  services of the firewall (input only,
 #                 instead of proto and ports)
 # Input and forward drop what no rule accepts, output uses OUTPUT_POLICY.
+# With FIREWALL=manual none of these are loaded: the ruleset is whatever
+# is in /etc/nftables.d/*.nft.
 # Interfaces with routing=no are never routed (forward rules cannot name
 # them), apart from dnat port forwards.
 # Replies to allowed traffic, loopback, ICMPv6, the WireGuard ports, and DHCP
@@ -319,6 +327,14 @@ ifaces_links() {
 
 SERVICES=ping,ssh,dns,dhcp,webui
 
+# is_tcpflags V: "syn", "syn|fin" (any set) or "syn&!ack" (all as given)
+is_tcpflags() {
+	case $1 in *'|'*'&'*|*'&'*'|'*|''|*'|'|'|'*|*'&'|'&'*|*'||'*|*'&&'*) return 1 ;; esac
+	case $1 in *'|'*) case $1 in *!*) return 1 ;; esac ;; esac
+	for _t in $(echo "$1" | tr '|&' '  '); do
+		case ${_t#!} in fin|syn|rst|psh|ack|urg) ;; *) return 1 ;; esac
+	done
+}
 is_iface_list() {
 	case $1 in ''|,*|*,|*,,*) return 1 ;; esac
 	for _i in $(echo "$1" | tr ',' ' '); do is_iface "$_i" || return 1; done
@@ -342,7 +358,7 @@ net_family() {
 }
 
 # fw_each FILE CALLBACK: validate the rules file and call CALLBACK with
-#   KIND ACTION IN OUT SRC DST PROTO SPORT DPORT SERVICE TO FAMILY COMMENT
+#   KIND ACTION IN OUT SRC DST PROTO SPORT DPORT SERVICE TO FAMILY TCPFLAGS COMMENT
 # (unused fields empty; FAMILY 4, 6 or empty). With CALLBACK "-" only
 # validates. Interface names must be listed in the interfaces file when
 # IF_NAMES is set. Sets WEBUI_IFS, DNS_IFS and DHCPSVC_IFS (interfaces a rule
@@ -370,7 +386,7 @@ fw_each() {
 			masquerade|dnat) ;;
 			*) err "$_f" "$_n" "expected input, output, forward, masquerade or dnat"; continue ;;
 		esac
-		_in='' _out='' _src='' _dst='' _proto='' _sport='' _dport='' _svc='' _to='' _fam=''
+		_in='' _out='' _src='' _dst='' _proto='' _sport='' _dport='' _svc='' _to='' _fam='' _ipv='' _flags=''
 		for _kv; do
 			_v=${_kv#*=}
 			case $_kv in
@@ -378,9 +394,12 @@ fw_each() {
 				out=*) is_iface_list "$_v" && _out=$_v || _bad="out: interface names separated by commas" ;;
 				src=*) _src=$_v; net_family "$_v" > /dev/null || _bad="src: IPv4 or IPv6 addresses or ADDR/PREFIX of one family, separated by commas" ;;
 				dst=*) _dst=$_v; net_family "$_v" > /dev/null || _bad="dst: IPv4 or IPv6 addresses or ADDR/PREFIX of one family, separated by commas" ;;
-				proto=tcp|proto=udp|proto=tcp,udp|proto=icmp) _proto=$_v ;;
+				proto=tcp|proto=udp|proto=tcp,udp|proto=icmp|proto=icmpv6|proto=gre|proto=esp|proto=ah|proto=ipip) _proto=$_v ;;
 				proto=udp,tcp) _proto=tcp,udp ;;
-				proto=*) _bad="proto: tcp, udp, tcp,udp or icmp" ;;
+				proto=*) _bad="proto: tcp, udp, tcp,udp, icmp, icmpv6, gre, esp, ah or ipip" ;;
+				ip=4|ip=6) _ipv=$_v ;;
+				ip=*) _bad="ip: 4 or 6" ;;
+				tcpflags=*) is_tcpflags "$_v" && _flags=$_v || _bad="tcpflags: fin, syn, rst, psh, ack, urg joined by | (any) or & (all, ! for not set)" ;;
 				sport=*) is_port_list "$_v" && _sport=$_v || _bad="sport: ports or PORT-PORT ranges separated by commas" ;;
 				dport=*) is_port_list "$_v" && _dport=$_v || _bad="dport: ports or PORT-PORT ranges separated by commas" ;;
 				service=*)
@@ -404,6 +423,10 @@ fw_each() {
 			[ -z "$_dst" ] || _f6=$(net_family "$_dst")
 			[ -z "$_f4" ] || [ -z "$_f6" ] || [ "$_f4" = "$_f6" ] || _bad="src and dst must both be IPv4 or both IPv6"
 			_fam=${_f4:-$_f6}
+			[ -z "$_ipv" ] || [ -z "$_fam" ] || [ "$_ipv" = "$_fam" ] || _bad="ip=$_ipv does not match the addresses"
+			_fam=${_fam:-$_ipv}
+			case $_proto:$_fam in icmp:6) _bad="proto=icmp is IPv4 (use icmpv6)" ;; icmpv6:4) _bad="proto=icmpv6 is IPv6 (use icmp)" ;; esac
+			[ -z "$_flags" ] || [ "$_proto" = tcp ] || _bad="tcpflags needs proto=tcp"
 			[ -z "$_sport$_dport" ] || case $_proto in tcp|udp|tcp,udp) ;; *) _bad="sport and dport need proto=tcp, udp or tcp,udp" ;; esac
 			case $_kind in
 				input)
@@ -416,12 +439,12 @@ fw_each() {
 			case $_kind in
 				masquerade)
 					[ -n "$_out" ] || _bad="masquerade needs out="
-					[ -z "$_in$_proto$_sport$_dport" ] || _bad="masquerade takes out=, src= and dst= only"
+					[ -z "$_in$_proto$_sport$_dport$_flags" ] || _bad="masquerade takes out=, src= and dst= only"
 					[ "$_fam" != 6 ] || _bad="masquerade is IPv4 only" ;;
 				dnat)
 					[ -n "$_in" ] && [ -n "$_dport" ] && [ -n "$_to" ] || _bad="dnat needs in=, proto=, dport= and to="
 					case $_proto in tcp|udp) ;; *) _bad="dnat needs proto=tcp or proto=udp" ;; esac
-					[ -z "$_out$_sport" ] || _bad="dnat takes in=, proto=, dport=, to=, src= and dst= only"
+					[ -z "$_out$_sport$_flags" ] || _bad="dnat takes in=, proto=, dport=, to=, src= and dst= only"
 					case $_dport in *,*) _bad="dnat: one dport or one PORT-PORT range" ;; esac
 					case $_dport:$_to in *-*:*:*) _bad="dnat: a port range forwards to the same ports (to=IP without :PORT)" ;; esac
 					[ "$_fam" != 6 ] || _bad="dnat is IPv4 only" ;;
@@ -442,7 +465,7 @@ fw_each() {
 			case ,$_svc, in *,dns,*) DNS_IFS="$DNS_IFS $_w" ;; esac
 			case ,$_svc, in *,dhcp,*) DHCPSVC_IFS="$DHCPSVC_IFS $_w" ;; esac
 		fi
-		[ "$_cb" = - ] || "$_cb" "$_kind" "$_act" "$_in" "$_out" "$_src" "$_dst" "$_proto" "$_sport" "$_dport" "$_svc" "$_to" "$_fam" "$_c"
+		[ "$_cb" = - ] || "$_cb" "$_kind" "$_act" "$_in" "$_out" "$_src" "$_dst" "$_proto" "$_sport" "$_dport" "$_svc" "$_to" "$_fam" "$_flags" "$_c"
 	done < "$_f"
 	WEBUI_IFS=${WEBUI_IFS# } DNS_IFS=${DNS_IFS# } DHCPSVC_IFS=${DHCPSVC_IFS# }
 	[ "$_errors" -eq 0 ]
@@ -686,11 +709,13 @@ l() {
 	printf '%s\n' "$*"
 }
 
-# _match IN OUT SRC DST PROTO SPORT DPORT FAMILY: the nft match of a rule
+# _match IN OUT SRC DST PROTO SPORT DPORT FAMILY [TCPFLAGS]: the nft match of a rule
 _match() {
 	_m=''
 	[ -z "$1" ] || _m="$_m iifname $(nft_set "$(echo "$1" | tr ',' ' ')")"
 	[ -z "$2" ] || _m="$_m oifname $(nft_set "$(echo "$2" | tr ',' ' ')")"
+	# an IP version without addresses to imply it
+	[ -z "$8" ] || [ -n "$3$4" ] || _m="$_m meta nfproto ipv$8"
 	_ip=ip
 	[ "$8" != 6 ] || _ip=ip6
 	[ -z "$3" ] || _m="$_m $_ip saddr $(nft_list "$3")"
@@ -710,7 +735,29 @@ _match() {
 				6) _m="$_m meta l4proto ipv6-icmp" ;;
 				*) _m="$_m meta l4proto { icmp, ipv6-icmp }" ;;
 			esac ;;
+		icmpv6) _m="$_m meta l4proto ipv6-icmp" ;;
+		# by number, so nothing depends on /etc/protocols
+		gre) _m="$_m meta l4proto 47" ;;
+		esp) _m="$_m meta l4proto 50" ;;
+		ah) _m="$_m meta l4proto 51" ;;
+		ipip) _m="$_m meta l4proto 4" ;;
 	esac
+	if [ -n "${9:-}" ]; then
+		case $9 in
+			*'|'*|*'&'*) ;;
+			*) _m="$_m tcp flags & ($9) == $9" ;;
+		esac
+		case $9 in
+			*'|'*) _m="$_m tcp flags & ($(echo "$9" | sed 's/|/ | /g')) != 0" ;;
+			*'&'*)
+				_mask='' _want=''
+				for _t in $(echo "$9" | tr '&' ' '); do
+					_mask="${_mask:+$_mask | }${_t#!}"
+					case $_t in !*) ;; *) _want="${_want:+$_want | }$_t" ;; esac
+				done
+				_m="$_m tcp flags & ($_mask) == ${_want:-0}" ;;
+		esac
+	fi
 	printf '%s' "${_m# }"
 }
 
@@ -725,32 +772,39 @@ _svc_match() {
 	esac
 }
 
-# fw_each callbacks: KIND ACTION IN OUT SRC DST PROTO SPORT DPORT SERVICE TO FAMILY COMMENT
+# fw_each callbacks: KIND ACTION IN OUT SRC DST PROTO SPORT DPORT SERVICE TO FAMILY TCPFLAGS COMMENT
 _r_filter() { # rules of the chain in $_chain
 	[ "$1" = "$_chain" ] || return 0
-	_mt=$(_match "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${12}")
+	_mt=$(_match "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${12}" "${13}")
 	if [ -n "${10}" ]; then
 		for _s in $(echo "${10}" | tr ',' ' '); do
-			l 2 "${_mt:+$_mt }$(_svc_match "$_s") $2$(_nft_comment "${13}")"
+			l 2 "${_mt:+$_mt }$(_svc_match "$_s") $2$(_nft_comment "${14}")"
 		done
 	else
-		l 2 "${_mt:+$_mt }$2$(_nft_comment "${13}")"
+		l 2 "${_mt:+$_mt }$2$(_nft_comment "${14}")"
 	fi
 }
 _r_masq() {
 	[ "$1" = masquerade ] || return 0
-	_mt=$(_match "" "$4" "$5" "$6" "" "" "" 4)
-	l 2 "meta nfproto ipv4 $_mt masquerade$(_nft_comment "${13}")"
+	_mt=$(_match "" "$4" "$5" "$6" "" "" "" "")
+	l 2 "meta nfproto ipv4 $_mt masquerade$(_nft_comment "${14}")"
 }
 _r_dnat() {
 	[ "$1" = dnat ] || return 0
-	_mt=$(_match "$3" "" "$5" "$6" "$7" "" "$9" 4)
-	l 2 "$_mt dnat ip to ${11}$(_nft_comment "${13}")"
+	_mt=$(_match "$3" "" "$5" "$6" "$7" "" "$9" "")
+	l 2 "$_mt dnat ip to ${11}$(_nft_comment "${14}")"
 }
 
-# Print the nftables ruleset. Needs config_load first.
+# Print the nftables ruleset. Needs config_load first. With FIREWALL=manual
+# the rules are left to /etc/nftables.d, unless $1 is "rules".
 render_nft() {
+	if [ "$FIREWALL" = manual ] && [ "${1:-}" != rules ]; then
+		l 0 "# Generated by pxmxfw: FIREWALL=manual in $PXMXFW_ETC/pxmxfw.conf, so the"
+		l 0 "# firewall rules are the files in /etc/nftables.d/*.nft."
+		return 0
+	fi
 	_rules=$PXMXFW_ETC/rules
+	_nosyn='ct state new tcp flags & (fin | syn | rst | ack) != syn drop comment "new TCP without SYN"'
 	_dhcp=67
 	[ "$IPV6" = no ] || _dhcp='{ 67, 547 }'
 	_wg=''
@@ -762,6 +816,7 @@ render_nft() {
 	l 0
 	l 2 "ct state established,related accept"
 	l 2 "ct state invalid drop"
+	l 2 "$_nosyn"
 	l 2 "iifname \"lo\" accept"
 	l 2 "meta l4proto ipv6-icmp accept"
 	l 2 "iifname \"$WAN_IF\" udp dport 546 accept comment \"DHCPv6 client\""
@@ -779,6 +834,7 @@ render_nft() {
 	l 0
 	l 2 "ct state established,related accept"
 	l 2 "ct state invalid drop"
+	l 2 "$_nosyn"
 	[ "$IPV6" = yes ] || l 2 "meta nfproto ipv6 drop comment \"IPv6 routing is off\""
 	l 2 "ct status dnat accept comment \"port forwards\""
 	if [ -n "$NOROUTE_IFS" ]; then

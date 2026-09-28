@@ -32,6 +32,7 @@ RULESET=$PXMXFW_ETC/ruleset.nft
 IFACES=$PXMXFW_ETC/interfaces
 RULES=$PXMXFW_ETC/rules
 NFT_MAIN=${PXMXFW_NFT_MAIN:-/etc/nftables.nft}
+NFT_D=${PXMXFW_NFT_D:-/etc/nftables.d}
 FIRSTBOOT_DONE=$PXMXFW_ETC/.firstboot-done
 WG_DIR=$PXMXFW_ETC/wg
 
@@ -236,11 +237,48 @@ apply_system() {
 	fi
 }
 
+# FIREWALL=manual: the rules are the admin's files in /etc/nftables.d. So
+# that switching over never leaves the firewall open, the first switch
+# writes the current rules there as a starting point (or brings back the
+# file of an earlier switch). Switching back to FIREWALL=rules parks that
+# file as firewall.nft.off, so it does not drop what the rules allow.
+MANUAL_HEAD='# Firewall rules written by hand (FIREWALL=manual'
+seed_manual() {
+	f=$NFT_D/firewall.nft
+	if [ "$FIREWALL" != manual ]; then
+		if [ -f "$f" ] && head -n 1 "$f" | grep -qF "$MANUAL_HEAD"; then
+			mv "$f" "$f.off"
+			echo "firewall: rules from $PXMXFW_ETC/rules; moved the hand-written $f to $f.off"
+		fi
+		return 0
+	fi
+	set +f
+	for _f in "$NFT_D"/*.nft; do
+		[ -e "$_f" ] && { set -f; return 0; }
+	done
+	set -f
+	if [ -f "$f.off" ]; then
+		mv "$f.off" "$f"
+		echo "firewall: manual; loading $f again"
+		return 0
+	fi
+	mkdir -p "$NFT_D"
+	{
+		echo "$MANUAL_HEAD in $PXMXFW_ETC/pxmxfw.conf)."
+		echo "# This started as a copy of the rules pxmxfw generated. Edit it, add more"
+		echo "# files here, then run: pxmxfw apply (it checks them before loading)."
+		render_nft rules | sed '1d; s/^table inet pxmxfw {/table inet firewall {/'
+	} > "$NFT_D/firewall.nft.new"
+	mv "$NFT_D/firewall.nft.new" "$NFT_D/firewall.nft"
+	echo "firewall: manual; wrote the current rules to $NFT_D/firewall.nft to start from"
+}
+
 cmd_apply() {
 	cmd_migrate
 	load
 	[ "${1:-}" = --boot ] || apply_system
 
+	seed_manual
 	tmp=$RULESET.new
 	render_nft > "$tmp"
 	# Check the candidate with the same wrapper nftables uses at boot
@@ -607,7 +645,14 @@ cmd_check() {
 	[ "$IF_NAMES" != "$WAN" ] || _check warn inside "LAN side" "no interface besides the WAN" \
 		"Add a second network device in Proxmox (pct set CTID -net1 name=eth1,bridge=vmbr1,ip=192.168.10.1/24), then add rules for it in the web UI."
 
-	if nft list table inet pxmxfw >/dev/null 2>&1; then
+	if [ "$FIREWALL" = manual ]; then
+		if [ -n "$(nft list ruleset 2>/dev/null | grep 'hook input')" ]; then
+			_check ok firewall "Firewall rules" "written by hand in /etc/nftables.d (FIREWALL=manual)" ""
+		else
+			_check fail firewall "Firewall rules" "FIREWALL=manual, but no loaded rules filter input" \
+				"Put your rules in /etc/nftables.d/*.nft and run: pxmxfw apply, or switch back to the rules from the web UI."
+		fi
+	elif nft list table inet pxmxfw >/dev/null 2>&1; then
 		_check ok firewall "Firewall rules" "loaded" ""
 	else
 		_check fail firewall "Firewall rules" "not loaded" "Fix the failed checks above, then click Apply (or run: pxmxfw apply)."
@@ -667,7 +712,8 @@ cmd_status() {
 	echo "uptime=$(awk '{ printf "%d\n", $1 }' /proc/uptime)"
 	echo "wan_if=$WAN_IF"
 	echo "ipv6=$IPV6"
-	if nft list table inet pxmxfw >/dev/null 2>&1; then echo firewall=active; else echo firewall=inactive; fi
+	if [ "$FIREWALL" = manual ]; then echo firewall=manual
+	elif nft list table inet pxmxfw >/dev/null 2>&1; then echo firewall=active; else echo firewall=inactive; fi
 	if pidof dnsmasq >/dev/null 2>&1; then echo dnsmasq=running
 	elif [ "$DNSMASQ" = yes ]; then echo dnsmasq=stopped
 	else echo dnsmasq=disabled; fi
@@ -696,6 +742,8 @@ cmd_status() {
 # any) reach it; the firewall still limits who does.
 cmd_webui_listen() {
 	config_load 2>/dev/null || true
+	# hand-written rules decide who reaches it
+	[ "$FIREWALL" != manual ] || { echo "$WEBUI_PORT"; return; }
 	ifs=$(echo "$WEBUI_IFS" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ')
 	set -- $ifs
 	if [ $# -eq 1 ] && [ "$1" != '*' ]; then

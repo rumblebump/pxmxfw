@@ -121,7 +121,6 @@ expect_invalid rules 'input accept service=ssh proto=tcp dport=22'
 expect_invalid rules 'forward accept service=ssh'
 expect_invalid rules 'forward accept dport=22'                  # ports need a protocol
 expect_invalid rules 'forward accept proto=icmp dport=22'
-expect_invalid rules 'forward accept proto=gre'
 expect_invalid rules 'forward accept src=10.0.0.0/33'
 expect_invalid rules 'forward accept src=10.0.0.0/8,fd00::/8'
 expect_invalid rules 'forward accept src=10.0.0.0/8 dst=fd00::/8'
@@ -139,6 +138,23 @@ expect_invalid rules 'dnat in=eth0 proto=tcp dport=443 to=host'
 expect_invalid rules 'dnat in=eth0 proto=tcp dport=1000-2000 to=192.168.10.10:80'
 expect_invalid rules 'dnat in=eth0 proto=tcp dport=80,81 to=192.168.10.10'
 expect_invalid rules 'accept in=eth0'
+expect_valid rules 'input accept in=eth1 proto=tcp dport=22 tcpflags=syn&!ack'
+expect_valid rules 'forward drop proto=tcp tcpflags=syn|fin'
+expect_valid rules 'forward accept proto=gre'
+expect_valid rules 'forward accept proto=esp ip=4'
+expect_valid rules 'input accept proto=icmpv6 ip=6'
+expect_valid rules 'forward accept ip=6 src=fd00::/8'
+expect_invalid rules 'forward accept proto=udp tcpflags=syn'
+expect_invalid rules 'forward accept proto=tcp tcpflags=syn|!ack'
+expect_invalid rules 'forward accept proto=tcp tcpflags=syn|ack&fin'
+expect_invalid rules 'forward accept proto=tcp tcpflags=ece'
+expect_invalid rules 'forward accept proto=tcp tcpflags=syn;reboot'
+expect_invalid rules 'forward accept ip=4 src=fd00::/8'
+expect_invalid rules 'forward accept proto=icmp ip=6'
+expect_invalid rules 'forward accept proto=sctp'
+expect_invalid rules 'forward accept ip=5'
+expect_valid settings 'FIREWALL=manual'
+expect_invalid settings 'FIREWALL=off'
 # interface names are checked against the interfaces file
 mkdir -p "$T/names"; printf 'eth0\neth1\n' > "$T/names/interfaces"
 printf 'forward accept in=eth1 out=eth9\n' > "$T/v"
@@ -206,6 +222,18 @@ grep -q 'oifname { "eth2" } ip saddr 10.0.3.0/24 masquerade' "$T/rules.nft" && o
 	[ "$(grep -n 'ip daddr {' "$T/rules.nft" | cut -d: -f1)" -lt "$(grep -n 'th dport { 53, 853 }' "$T/rules.nft" | cut -d: -f1)" ] &&
 	ok || bad "rules keep the file's order"
 grep -q 'eth4' "$T/rules.nft" && bad "an interface without rules appears in the ruleset" || ok
+
+cat >> "$T/etc/rules" <<'RULES'
+input accept in=eth2 proto=tcp dport=2222 tcpflags=syn&!ack
+forward drop in=eth3 proto=tcp tcpflags=syn|fin
+forward accept in=eth3 out=eth0 proto=gre
+forward accept in=eth3 out=eth0 proto=esp ip=4
+RULES
+check_ruleset protos
+grep -q 'tcp dport 2222 tcp flags & (syn | ack) == syn accept' "$T/protos.nft" && ok || bad "tcpflags with & and !"
+grep -q 'tcp flags & (syn | fin) != 0 drop' "$T/protos.nft" && ok || bad "tcpflags with |"
+grep -q 'meta l4proto 47 accept' "$T/protos.nft" && grep -q 'meta nfproto ipv4 meta l4proto 50 accept' "$T/protos.nft" && ok || bad "gre, esp and ip=4"
+grep -q 'ct state new tcp flags & (fin | syn | rst | ack) != syn drop' "$T/protos.nft" && ok || bad "new TCP without SYN is dropped"
 
 sed -i 's/^OUTPUT_POLICY=.*/OUTPUT_POLICY=drop/; s/^IPV6=.*/IPV6=yes/' "$T/etc/pxmxfw.conf"
 sed -i 's/^eth1$/eth1 addr=192.168.10.1\/24 dhcp=192.168.10.100-192.168.10.200/' "$T/etc/interfaces"
@@ -382,6 +410,36 @@ PXMXFW_ETC=$T/etc "$PXMXFW" render dnsmasq > "$T/out" 2>&1 && grep -qx 'interfac
 cp "$T/etc/rules" "$T/before"
 PXMXFW_ETC=$T/etc "$PXMXFW" migrate > /dev/null 2>&1
 cmp -s "$T/before" "$T/etc/rules" && ok || bad "migrate runs once"
+
+# FIREWALL=manual: the ruleset is /etc/nftables.d, started from the current rules
+fresh_etc "$T/etc"
+sed -i 's/^FIREWALL=.*/FIREWALL=manual/' "$T/etc/pxmxfw.conf"
+PXMXFW_ETC=$T/etc "$PXMXFW" render nft > "$T/manual.nft" 2>&1
+grep -q '^table' "$T/manual.nft" && bad "FIREWALL=manual still generates rules" || ok
+if [ -n "$NFT" ]; then
+	mkdir -p "$T/nftd"
+	printf 'flush ruleset\ninclude "%s"\ninclude "%s/*.nft"\n' "$T/etc/ruleset.nft" "$T/nftd" > "$T/main.nft"
+	: > "$T/etc/ruleset.nft"
+	if unshare -n sh -c "PATH='$T/ipbin:$PATH' PXMXFW_ETC='$T/etc' PXMXFW_SYSNET='$T/sys' PXMXFW_PROCSYS='$T/procsys' PXMXFW_NFT_MAIN='$T/main.nft' PXMXFW_NFT_D='$T/nftd' PXMXFW_DNSMASQ_CONF='$T/dnsmasq.conf' '$PXMXFW' apply && nft list ruleset" > "$T/out" 2>&1 &&
+		grep -q 'table inet firewall' "$T/out" && ! grep -q 'table inet pxmxfw' "$T/out" && grep -q 'masquerade' "$T/nftd/firewall.nft"; then ok
+	else bad "FIREWALL=manual starts from the current rules: $(cat "$T/out")"; fi
+	run_apply() { unshare -n sh -c "PATH='$T/ipbin:$PATH' PXMXFW_ETC='$T/etc' PXMXFW_SYSNET='$T/sys' PXMXFW_PROCSYS='$T/procsys' PXMXFW_NFT_MAIN='$T/main.nft' PXMXFW_NFT_D='$T/nftd' PXMXFW_DNSMASQ_CONF='$T/dnsmasq.conf' '$PXMXFW' apply && nft list ruleset"; }
+	sed -i 's/^FIREWALL=.*/FIREWALL=rules/' "$T/etc/pxmxfw.conf"
+	if run_apply > "$T/out" 2>&1 && ! grep -q 'table inet firewall' "$T/out" && grep -q 'table inet pxmxfw' "$T/out" &&
+		[ -f "$T/nftd/firewall.nft.off" ] && [ ! -e "$T/nftd/firewall.nft" ]; then ok
+	else bad "back to FIREWALL=rules parks the hand-written file: $(cat "$T/out")"; fi
+	sed -i 's/^FIREWALL=.*/FIREWALL=manual/' "$T/etc/pxmxfw.conf"
+	if run_apply > "$T/out" 2>&1 && grep -q 'table inet firewall' "$T/out" && [ ! -e "$T/nftd/firewall.nft.off" ]; then ok
+	else bad "FIREWALL=manual again brings the hand-written file back: $(cat "$T/out")"; fi
+	echo '# mine' > "$T/nftd/firewall.nft"
+	unshare -n sh -c "PATH='$T/ipbin:$PATH' PXMXFW_ETC='$T/etc' PXMXFW_SYSNET='$T/sys' PXMXFW_PROCSYS='$T/procsys' PXMXFW_NFT_MAIN='$T/main.nft' PXMXFW_NFT_D='$T/nftd' PXMXFW_DNSMASQ_CONF='$T/dnsmasq.conf' '$PXMXFW' apply" > /dev/null 2>&1
+	[ "$(cat "$T/nftd/firewall.nft")" = '# mine' ] && ok || bad "FIREWALL=manual never overwrites the admin's files"
+	sed -i 's/^FIREWALL=.*/FIREWALL=rules/' "$T/etc/pxmxfw.conf"
+	run_apply > /dev/null 2>&1
+	[ "$(cat "$T/nftd/firewall.nft")" = '# mine' ] && ok || bad "FIREWALL=rules leaves files it did not write"
+	sed -i 's/^FIREWALL=.*/FIREWALL=manual/' "$T/etc/pxmxfw.conf"
+fi
+[ "$(PXMXFW_ETC=$T/etc "$PXMXFW" webui-listen 2>/dev/null)" = 8443 ] && ok || bad "FIREWALL=manual: web UI on all addresses"
 
 # the web UI listens on all addresses when rules let several interfaces reach it
 fresh_etc "$T/etc"

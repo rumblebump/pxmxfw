@@ -246,7 +246,7 @@ dnsmasq config. Nothing else needs editing.
 
 | File | Content |
 | --- | --- |
-| `pxmxfw.conf` | `KEY=value` settings: `WAN` (default `eth0`), `OUTPUT_POLICY` (`accept` or `drop`), `IPV6`, `WEBUI_PORT`, `DNSMASQ`, `DNS_UPSTREAM`, `DNS_DOMAIN`, `DHCP_LEASE` |
+| `pxmxfw.conf` | `KEY=value` settings: `WAN` (default `eth0`), `FIREWALL` (`rules` or `manual`), `OUTPUT_POLICY` (`accept` or `drop`), `IPV6`, `WEBUI_PORT`, `DNSMASQ`, `DNS_UPSTREAM`, `DNS_DOMAIN`, `DHCP_LEASE` |
 | `interfaces` | `IFACE [addr=proxmox\|none\|IP/PREFIX] [addr6=...] [routing=yes\|no] [dhcp=START-END] [lease=TIME] [dns=IP,IP] [gateway=IP\|none] [routes=NET,NET] [type=vlan link=IFACE vid=N \| type=bridge ports=IFACE,...]` |
 | `rules` | firewall rules, see below |
 | `hosts` | `IP NAME [MAC]`: local DNS names, fixed DHCP leases with a MAC |
@@ -281,7 +281,8 @@ that matches decides.
 
 ```
 input|output|forward accept|drop|reject [in=IF] [out=IF] [src=NET] [dst=NET]
-    [proto=tcp|udp|tcp,udp|icmp] [sport=PORT] [dport=PORT] [service=LIST]
+    [ip=4|6] [proto=PROTO] [sport=PORT] [dport=PORT] [tcpflags=FLAGS]
+    [service=LIST]
 masquerade out=IF [src=NET] [dst=NET]
 dnat in=IF proto=tcp|udp dport=PORT to=IP[:PORT] [src=NET] [dst=NET]
 ```
@@ -292,6 +293,12 @@ dnat in=IF proto=tcp|udp dport=PORT to=IP[:PORT] [src=NET] [dst=NET]
   networks (`10.0.0.0/8`), `sport` and `dport` ports or ranges
   (`8000-8100`). Each takes a comma list; a field left out matches
   anything.
+- `proto` is `tcp`, `udp`, `tcp,udp`, `icmp`, `icmpv6`, `gre`, `esp`, `ah`
+  or `ipip`; ports need `tcp` or `udp`. `ip=4` or `ip=6` limits a rule to
+  one IP version (addresses in `src` and `dst` already do).
+- `tcpflags` (with `proto=tcp`) takes `syn`, `ack`, `fin`, `rst`, `psh`,
+  `urg`. `syn|fin` matches when any of them is set, `syn&!ack` when all
+  conditions hold (`!` means not set). A single flag means it is set.
 - `service=` (input only) names services of the firewall instead of
   protocol and port: `ping`, `ssh`, `dns`, `dhcp`, `webui` (`WEBUI_PORT`).
 - `masquerade` gives traffic leaving `out` that interface's address (NAT).
@@ -301,8 +308,9 @@ dnat in=IF proto=tcp|udp dport=PORT to=IP[:PORT] [src=NET] [dst=NET]
 - `input` and `forward` drop what no rule accepts; `output` uses
   `OUTPUT_POLICY` (default `accept`). Replies to allowed connections,
   loopback, ICMPv6, the WireGuard ports, and DHCP and DNS on an interface
-  with a `dhcp=` range always pass. With `IPV6=no` (the default) nothing is
-  routed over IPv6.
+  with a `dhcp=` range always pass. Invalid packets and new TCP connections
+  that do not start with a SYN are dropped. With `IPV6=no` (the default)
+  nothing is routed over IPv6.
 
 ```
 input accept in=eth1 service=ping,ssh,dns,dhcp,webui # the LAN reaches the firewall
@@ -313,6 +321,16 @@ forward accept in=eth2 out=eth1 dst=192.168.10.10 proto=tcp dport=443
 masquerade out=eth0
 dnat in=eth0 proto=tcp dport=8443 to=192.168.10.10:443
 ```
+
+**Rules written by hand.** For rules this format cannot express, set
+`FIREWALL=manual` (Firewall > General in the web UI). pxmxfw then loads no
+rules of its own and the ruleset is `/etc/nftables.d/*.nft`, edited in the
+terminal. The first `pxmxfw apply` in this mode writes the current rules to
+`/etc/nftables.d/firewall.nft` (table `inet firewall`) as a starting point,
+so the switch never leaves the firewall open or locks you out. `apply` checks
+the files with `nft -c` before loading anything. Switching back to
+`FIREWALL=rules` moves that file to `firewall.nft.off`; switching to manual
+again brings it back.
 
 **Upgrading from interface roles.** Configs from before the rules file (with
 `role=` and `allow=` on interfaces, `NAT`, `WAN_PING` and `WEBUI_WAN` in
@@ -330,8 +348,10 @@ pxmxfw status
 
 Every value is checked before anything changes, and `apply` gives the same
 result however often it runs. To manage the firewall with Ansible, Puppet
-or git, write the files in `/etc/pxmxfw` and run `pxmxfw apply`. Extra
-hand-written nftables rules go in `/etc/nftables.d/*.nft`.
+or git, write the files in `/etc/pxmxfw` and run `pxmxfw apply`. Other
+`/etc/nftables.d/*.nft` files load next to the generated rules; to be let
+through, a packet has to pass both, so filter rules there can only drop
+more.
 
 No SSH server is installed; use `pct enter 200`, or `apk add openssh` and
 allow SSH on the interfaces you want under Firewall.

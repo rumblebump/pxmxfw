@@ -147,7 +147,7 @@ function network(cidr) {
 	return { base: Math.floor(ip2n(ip) / size) * size, size, prefix: Number(p) };
 }
 
-const SETTINGS_ORDER = ['WAN', 'OUTPUT_POLICY', 'IPV6', 'WEBUI_PORT', 'DNSMASQ',
+const SETTINGS_ORDER = ['WAN', 'FIREWALL', 'OUTPUT_POLICY', 'IPV6', 'WEBUI_PORT', 'DNSMASQ',
 	'DNS_UPSTREAM', 'DNS_DOMAIN', 'DHCP_LEASE'];
 
 let hostId = 1;
@@ -213,7 +213,7 @@ function newRule(kind, o = {}) {
 	return {
 		id: ruleId++, kind, action: ['input', 'output', 'forward'].includes(kind) ? 'accept' : '',
 		in: '', out: '', src: '', dst: '', proto: kind === 'dnat' ? 'tcp' : '', sport: '', dport: '',
-		toIp: '', toPort: '', comment: '', ...o,
+		ip: '', flags: '', toIp: '', toPort: '', comment: '', ...o,
 	};
 }
 function parseFwRule(line) {
@@ -224,7 +224,7 @@ function parseFwRule(line) {
 	return newRule(kind, {
 		action, in: kv.in || '', out: kv.out || '', src: kv.src || '', dst: kv.dst || '',
 		proto: kv.service ? `svc:${kv.service}` : (kv.proto || ''), sport: kv.sport || '', dport: kv.dport || '',
-		toIp, toPort, comment,
+		ip: kv.ip || '', flags: kv.tcpflags || '', toIp, toPort, comment,
 	});
 }
 // a comma list without blanks
@@ -237,11 +237,13 @@ function fwRuleLine(r) {
 	if (r.kind !== 'input' && r.kind !== 'dnat') add('out', r.out);
 	add('src', r.src);
 	add('dst', r.dst);
+	if (r.kind !== 'masquerade' && r.kind !== 'dnat') add('ip', r.ip);
 	if (r.proto.startsWith('svc:')) add('service', r.proto.slice(4));
 	else if (r.kind !== 'masquerade') {
 		add('proto', r.proto);
 		if (r.kind !== 'dnat') add('sport', r.sport);
 		add('dport', r.dport);
+		if (r.proto === 'tcp' && r.kind !== 'dnat') add('tcpflags', String(r.flags || '').replace(/\s+/g, ''));
 	}
 	if (r.kind === 'dnat') f.push(`to=${r.toIp.trim()}${String(r.toPort).trim() ? `:${String(r.toPort).trim()}` : ''}`);
 	return f.join(' ') + (r.comment.trim() ? ` # ${r.comment.trim()}` : '');
@@ -337,7 +339,7 @@ document.addEventListener('alpine:init', () => {
 		COL_LABEL: {
 			action: 'Action', in: 'In', out: 'Out', src: 'Source', dst: 'Destination', proto: 'Protocol',
 			dnatproto: 'Protocol', sport: 'Source port', dport: 'Dest. port', port: 'Port', toIp: 'To address',
-			toPort: 'To port', comment: 'Comment',
+			toPort: 'To port', ip: 'IP', flags: 'TCP flags', comment: 'Comment',
 		},
 		// the Add interface form
 		adding: null,
@@ -579,7 +581,7 @@ document.addEventListener('alpine:init', () => {
 			try {
 				const [s, ifc, rl, h, wg] = await Promise.all(['settings', 'interfaces', 'rules', 'hosts', 'wireguard'].map(n => this.call('file', { name: n })));
 				this.tunnels = parseWireguard(wg);
-				this.settings = { WAN: 'eth0', OUTPUT_POLICY: 'accept', ...parseKV(s) };
+				this.settings = { WAN: 'eth0', FIREWALL: 'rules', OUTPUT_POLICY: 'accept', ...parseKV(s) };
 				this.ifaces = lines(ifc).map(parseIface);
 				for (const t of this.tunnels) {
 					if (!this.ifaces.some(r => r.name === t.name)) {
@@ -784,9 +786,9 @@ document.addEventListener('alpine:init', () => {
 		// the columns of the rule table shown
 		cols() {
 			return {
-				input: ['action', 'in', 'src', 'dst', 'proto', 'sport', 'dport', 'comment'],
-				forward: ['action', 'in', 'out', 'src', 'dst', 'proto', 'sport', 'dport', 'comment'],
-				output: ['action', 'out', 'dst', 'proto', 'sport', 'dport', 'comment'],
+				input: ['action', 'in', 'ip', 'src', 'dst', 'proto', 'sport', 'dport', 'flags', 'comment'],
+				forward: ['action', 'in', 'out', 'ip', 'src', 'dst', 'proto', 'sport', 'dport', 'flags', 'comment'],
+				output: ['action', 'out', 'ip', 'dst', 'proto', 'sport', 'dport', 'flags', 'comment'],
 				dnat: ['in', 'dnatproto', 'port', 'toIp', 'toPort', 'src', 'dst', 'comment'],
 				masquerade: ['out', 'src', 'dst', 'comment'],
 			}[this.ruleTab];
@@ -815,7 +817,8 @@ document.addEventListener('alpine:init', () => {
 		},
 		// protocol choices of a rule, keeping an unusual service list it already has
 		protoOptions(r) {
-			const o = [['', 'any'], ['tcp', 'TCP'], ['udp', 'UDP'], ['tcp,udp', 'TCP and UDP'], ['icmp', 'ICMP']];
+			const o = [['', 'any'], ['tcp', 'TCP'], ['udp', 'UDP'], ['tcp,udp', 'TCP and UDP'], ['icmp', 'ICMP'],
+				['icmpv6', 'ICMPv6'], ['gre', 'GRE'], ['esp', 'ESP (IPsec)'], ['ah', 'AH (IPsec)'], ['ipip', 'IP in IP']];
 			if (r.kind === 'input') {
 				for (const s of SERVICES) o.push([`svc:${s}`, `service: ${SERVICE_LABEL[s]}`]);
 				if (r.proto.startsWith('svc:') && !o.some(x => x[0] === r.proto)) o.push([r.proto, `service: ${r.proto.slice(4)}`]);
@@ -828,11 +831,13 @@ document.addEventListener('alpine:init', () => {
 			const any = (v, all) => list(v) ? list(v).replaceAll(',', ', ') : all;
 			const what = r.proto.startsWith('svc:') ? r.proto.slice(4).split(',').map(s => SERVICE_LABEL[s] || s).join(', ')
 				: !r.proto ? 'all traffic' : `${r.proto.replace(',', '/').toUpperCase()}${list(r.dport) ? ` to port ${any(r.dport)}` : ''}`;
+			const fam = r.ip ? `IPv${r.ip} ` : '';
+			const flags = r.proto === 'tcp' && r.flags ? ` with flags ${r.flags}` : '';
 			const from = `${any(r.src, 'anywhere')}${r.in ? ` on ${any(r.in)}` : ''}`;
 			switch (r.kind) {
-				case 'input': return `${r.action} ${what} from ${from} to this firewall`;
-				case 'output': return `${r.action} ${what} from this firewall to ${any(r.dst, 'anywhere')}${r.out ? ` via ${any(r.out)}` : ''}`;
-				case 'forward': return `${r.action} ${what} from ${from} to ${any(r.dst, 'anywhere')}${r.out ? ` via ${any(r.out)}` : ''}`;
+				case 'input': return `${r.action} ${fam}${what}${flags} from ${from} to this firewall`;
+				case 'output': return `${r.action} ${fam}${what}${flags} from this firewall to ${any(r.dst, 'anywhere')}${r.out ? ` via ${any(r.out)}` : ''}`;
+				case 'forward': return `${r.action} ${fam}${what}${flags} from ${from} to ${any(r.dst, 'anywhere')}${r.out ? ` via ${any(r.out)}` : ''}`;
 				case 'dnat': return `${(r.proto || '').toUpperCase()} port ${r.dport || '?'} on ${any(r.in, '?')} goes to ${r.toIp || '?'}${r.toPort ? `:${r.toPort}` : ''}`;
 				case 'masquerade': return `traffic from ${any(r.src, 'anywhere')} leaving ${any(r.out, '?')} gets its address`;
 			}

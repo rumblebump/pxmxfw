@@ -67,11 +67,11 @@
 			<span x-text="failedChecks.length + ' check(s) failed, so the firewall may not work.'"></span>
 			<button class="link" @click="tab = 'checks'">Open checks</button>
 		</div>
-		<div class="banner warn" x-show="webuiReachable([wan()])" x-cloak>
+		<div class="banner warn" x-show="settings.FIREWALL !== 'manual' && webuiReachable([wan()])" x-cloak>
 			The web UI is reachable from WAN. Turn this off under Firewall once the LAN side works.
 		</div>
 		<div class="cards">
-			<div class="card"><h3>Firewall</h3><b :class="status.firewall === 'active' ? 'ok' : 'fail'" x-text="status.firewall || '...'"></b></div>
+			<div class="card"><h3>Firewall</h3><b :class="['active', 'manual'].includes(status.firewall) ? 'ok' : 'fail'" x-text="status.firewall === 'manual' ? 'by hand' : (status.firewall || '...')"></b></div>
 			<div class="card"><h3>DNS / DHCP</h3><b :class="{ ok: status.dnsmasq === 'running', fail: status.dnsmasq === 'stopped' }" x-text="status.dnsmasq || '...'"></b></div>
 			<div class="card"><h3>Forwarding</h3><b :class="status.ip_forward === '1' ? 'ok' : 'fail'" x-text="status.ip_forward === '1' ? 'on' : 'off'"></b></div>
 			<div class="card"><h3>Uptime</h3><b x-text="uptime()"></b></div>
@@ -256,6 +256,11 @@
 
 	<!-- Firewall -->
 	<section x-show="tab === 'firewall'">
+		<div class="banner warn" x-show="settings.FIREWALL === 'manual'" x-cloak>
+			Firewall rules are written by hand: pxmxfw loads /etc/nftables.d/*.nft and ignores the rules below.
+			Edit those files in the terminal, then run <code>pxmxfw apply</code>. Switch back under General.
+		</div>
+		<div x-show="settings.FIREWALL !== 'manual'">
 		<h2>Access to this firewall</h2>
 		<p class="muted">
 			Which interfaces reach the firewall's own services. For finer control (only from some addresses, other ports)
@@ -297,6 +302,10 @@
 								</template>
 								<template x-if="c === 'in' || c === 'out'"><input x-model="r[c]" list="iface-list" placeholder="any"></template>
 								<template x-if="c === 'src' || c === 'dst'"><input x-model="r[c]" placeholder="any"></template>
+								<template x-if="c === 'ip'">
+									<select x-model="r.ip"><option value="">any</option><option value="4">IPv4</option><option value="6">IPv6</option></select>
+								</template>
+								<template x-if="c === 'flags'"><input x-model="r.flags" :disabled="r.proto !== 'tcp'" :placeholder="r.proto === 'tcp' ? 'any' : '-'" title="syn, fin, rst, psh, ack, urg; ! negates; | = any of, & = all of"></template>
 								<template x-if="c === 'proto'">
 									<select @change="r.proto = $event.target.value === 'any' ? '' : $event.target.value">
 										<template x-for="o in protoOptions(r)" :key="o[0]"><option :value="o[0] || 'any'" x-text="o[1]" :selected="o[0] === r.proto"></option></template>
@@ -327,7 +336,10 @@
 		<p class="hint">
 			Interfaces, addresses and ports take comma lists (eth1, eth2 / 10.0.0.0/8, 192.168.1.5 / 22, 8000-8100); empty means any.
 			Rules are checked top to bottom and the first one that matches decides.
+			TCP flags: <code>syn</code>, <code>fin|rst</code> (any of) or <code>syn&amp;!ack</code> (all of, ! means not set).
+			New TCP connections that do not start with SYN are always dropped.
 		</p>
+		</div>
 
 		<h2>General</h2>
 		<div class="form">
@@ -336,12 +348,19 @@
 					<template x-for="n in wanChoices()" :key="n"><option :value="n" x-text="n" :selected="n === wan()"></option></template>
 				</select>
 			</label>
-			<label>Traffic from this firewall that no rule matches
+			<label>Firewall rules
+				<select x-model="settings.FIREWALL"><option value="rules">set on this page</option><option value="manual">written by hand (nftables)</option></select>
+			</label>
+			<label x-show="settings.FIREWALL !== 'manual'">Traffic from this firewall that no rule matches
 				<select x-model="settings.OUTPUT_POLICY"><option value="accept">accept</option><option value="drop">drop</option></select>
 			</label>
 			<label>Web UI port <input type="number" min="1" max="65535" x-model="settings.WEBUI_PORT"></label>
 		</div>
-		<p class="muted">Traffic to the firewall and routed traffic that no rule accepts is always dropped. Replies to allowed connections, ICMPv6 and the WireGuard ports always pass.</p>
+		<p class="muted" x-show="settings.FIREWALL === 'manual'">
+			The first apply in this mode writes the current rules to /etc/nftables.d/firewall.nft as a starting point.
+			Make sure your own rules still let you reach SSH or the web UI.
+		</p>
+		<p class="muted" x-show="settings.FIREWALL !== 'manual'">Traffic to the firewall and routed traffic that no rule accepts is always dropped. Replies to allowed connections, ICMPv6 and the WireGuard ports always pass.</p>
 		<div class="actions"><button class="primary" :disabled="busy" @click="saveApply()">Save and apply</button></div>
 	</section>
 
