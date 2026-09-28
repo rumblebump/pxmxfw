@@ -84,10 +84,10 @@ the bond, the physical ports or OVS, and needs nothing extra for them.
 give the container one NIC on a VLAN-aware bridge or OVS bridge with
 `trunks=` and no `tag=`, for example
 `pct set 200 -net1 name=eth1,bridge=vmbr1,trunks=10;20;30`. The VLANs then
-arrive tagged on `eth1`. Leave `eth1` at role `off` and add one VLAN per
-network on the **Interfaces** page (link `eth1`, id `10`, role `lan`, and so
-on). pxmxfw brings `eth1` up for its VLANs even while its own role is
-`off`. This needs the `8021q` module (step 5).
+arrive tagged on `eth1`. Give `eth1` no address and no rules, and add one
+VLAN per network on the **Interfaces** page (link `eth1`, id `10`, and so
+on), then rules for each VLAN under **Firewall**. pxmxfw brings `eth1` up
+for its VLANs. This needs the `8021q` module (step 5).
 
 ## 3. Privileged or unprivileged
 
@@ -279,8 +279,8 @@ Without it, give them an address in `192.168.10.0/24` with gateway
 
 - **Another LAN, DMZ or guest network**: add a bridge on the host
   (`vmbr2`), then `pct set 200 -net2 name=eth2,bridge=vmbr2,ip=192.168.20.1/24`.
-  The new NIC is found at the next start or when you open the web UI, and
-  starts with role `off` until you give it one on the **Interfaces** page.
+  The new NIC is found at the next start or when you open the web UI.
+  Nothing passes through it until you add rules for it under **Firewall**.
 - **VLANs, bridges and WireGuard tunnels** made inside pxmxfw are added from
   the **Interfaces** and **WireGuard** pages; see the README. They need the
   `8021q`, `bridge` and `wireguard` modules on the host.

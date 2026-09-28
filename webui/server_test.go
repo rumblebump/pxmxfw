@@ -34,7 +34,7 @@ case $1 in
 	validate) if grep -q bad "$3"; then echo "$3:2: bad value"; exit 1; fi ;;
 	apply) echo applied ;;
 	status) echo firewall=active; echo "addr=eth0 10.20.0.5/24"; echo "addr=eth0 fd00::5/64" ;;
-	detect) ;;
+	detect|migrate) ;;
 	wg-keypair) echo private=PRIV; echo public=PUB ;;
 	pkg-list) echo "nano 8.4-r0" ;;
 	pkg-search) [ "$2" = nano ] || { echo "bad name"; exit 1; }; echo "nano-8.4-r0 - editor" ;;
@@ -51,7 +51,7 @@ func newEnv(t *testing.T) *env {
 	os.WriteFile(cmd, []byte(fakePxmxfw), 0o755)
 	etc := filepath.Join(dir, "etc")
 	os.Mkdir(etc, 0o755)
-	os.WriteFile(filepath.Join(etc, "services"), []byte("tcp 22\n"), 0o644)
+	os.WriteFile(filepath.Join(etc, "rules"), []byte("input accept service=ssh\n"), 0o644)
 	st, err := openStore(filepath.Join(dir, "db"))
 	if err != nil {
 		t.Fatal(err)
@@ -151,30 +151,30 @@ func TestLoginLimiter(t *testing.T) {
 func TestChangesNeedConfirmation(t *testing.T) {
 	e := newEnv(t)
 	c := e.login("root", "pw", "")
-	w := e.do(req{method: "POST", query: "action=save&name=services", body: "tcp 80\n", cookie: c})
+	w := e.do(req{method: "POST", query: "action=save&name=rules", body: "forward accept\n", cookie: c})
 	e.expect(w, 403, "save without confirming")
 	if w.Header().Get("X-Pxmxfw-Stepup") != "password" {
 		t.Fatalf("step-up method: %q", w.Header().Get("X-Pxmxfw-Stepup"))
 	}
-	e.expect(e.do(req{method: "POST", query: "action=save&name=services", body: "x", cookie: c, noHeader: true}), 403, "save without X-Pxmxfw")
+	e.expect(e.do(req{method: "POST", query: "action=save&name=rules", body: "x", cookie: c, noHeader: true}), 403, "save without X-Pxmxfw")
 	e.expect(e.do(req{method: "POST", query: "action=stepup", body: `{"password":"wrong"}`, cookie: c}), 403, "wrong password")
 	e.expect(e.do(req{method: "POST", query: "action=stepup", body: `{"password":"pw"}`, cookie: c}), 200, "confirm")
-	e.expect(e.do(req{method: "POST", query: "action=save&name=services", body: "tcp 80\n", cookie: c}), 200, "save")
-	if b, _ := os.ReadFile(filepath.Join(e.etc, "services")); string(b) != "tcp 80\n" {
-		t.Fatalf("services = %q", b)
+	e.expect(e.do(req{method: "POST", query: "action=save&name=rules", body: "forward accept\n", cookie: c}), 200, "save")
+	if b, _ := os.ReadFile(filepath.Join(e.etc, "rules")); string(b) != "forward accept\n" {
+		t.Fatalf("rules = %q", b)
 	}
-	w = e.do(req{method: "POST", query: "action=save&name=services", body: "tcp 80\nbad\n", cookie: c})
+	w = e.do(req{method: "POST", query: "action=save&name=rules", body: "forward accept\nbad\n", cookie: c})
 	e.expect(w, 422, "invalid file")
 	if got := w.Body.String(); got != "line 2: bad value\n" {
 		t.Fatalf("validation message %q", got)
 	}
-	if b, _ := os.ReadFile(filepath.Join(e.etc, "services")); string(b) != "tcp 80\n" {
+	if b, _ := os.ReadFile(filepath.Join(e.etc, "rules")); string(b) != "forward accept\n" {
 		t.Fatalf("invalid save changed the file: %q", b)
 	}
 	e.expect(e.do(req{method: "POST", query: "action=apply", cookie: c}), 200, "apply")
 	e.now = e.now.Add(stepUpWindow + time.Second)
 	e.expect(e.do(req{method: "POST", query: "action=apply", cookie: c}), 403, "confirmation expired")
-	if w := e.do(req{method: "GET", query: "action=audit", cookie: c}); !strings.Contains(w.Body.String(), "\tsave\tservices") {
+	if w := e.do(req{method: "GET", query: "action=audit", cookie: c}); !strings.Contains(w.Body.String(), "\tsave\trules") {
 		t.Fatalf("audit log: %q", w.Body.String())
 	}
 }
@@ -225,9 +225,9 @@ func TestAccessTokens(t *testing.T) {
 	e.do(req{method: "POST", query: "action=stepup", body: `{"password":"pw"}`, cookie: c})
 	ro, rw := create("read"), create("write")
 
-	e.expect(e.do(req{method: "GET", query: "action=file&name=services", bearer: ro}), 200, "read with token")
-	e.expect(e.do(req{method: "POST", query: "action=save&name=services", body: "tcp 1\n", bearer: ro, noHeader: true}), 403, "save with read token")
-	e.expect(e.do(req{method: "POST", query: "action=save&name=services", body: "tcp 1\n", bearer: rw, noHeader: true}), 200, "save with write token")
+	e.expect(e.do(req{method: "GET", query: "action=file&name=rules", bearer: ro}), 200, "read with token")
+	e.expect(e.do(req{method: "POST", query: "action=save&name=rules", body: "forward drop\n", bearer: ro, noHeader: true}), 403, "save with read token")
+	e.expect(e.do(req{method: "POST", query: "action=save&name=rules", body: "forward drop\n", bearer: rw, noHeader: true}), 200, "save with write token")
 	e.expect(e.do(req{method: "GET", query: "action=tokens", bearer: rw}), 403, "token management with a token")
 	e.expect(e.do(req{method: "GET", query: "action=status", bearer: "pxm_forged"}), 401, "forged token")
 

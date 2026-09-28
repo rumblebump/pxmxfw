@@ -147,7 +147,7 @@ function network(cidr) {
 	return { base: Math.floor(ip2n(ip) / size) * size, size, prefix: Number(p) };
 }
 
-const SETTINGS_ORDER = ['NAT', 'WAN_PING', 'IPV6', 'WEBUI_PORT', 'WEBUI_WAN', 'DNSMASQ',
+const SETTINGS_ORDER = ['WAN', 'OUTPUT_POLICY', 'IPV6', 'WEBUI_PORT', 'DNSMASQ',
 	'DNS_UPSTREAM', 'DNS_DOMAIN', 'DHCP_LEASE'];
 
 let hostId = 1;
@@ -158,22 +158,21 @@ const inNet = (ip, cidr) => {
 	return x >= n.base && x < n.base + n.size;
 };
 
-// What a lan or isolated interface may reach on the firewall itself
-const ALLOW = ['ping', 'ssh', 'dns', 'dhcp', 'webui'];
+// Services of the firewall itself that rules can open per interface
+const SERVICES = ['ping', 'ssh', 'dns', 'dhcp', 'webui'];
+const SERVICE_LABEL = { ping: 'ping', ssh: 'SSH', dns: 'DNS', dhcp: 'DHCP', webui: 'web UI' };
 
-// "eth2 role=lan addr=10.0.2.1/24 dhcp=a-b allow=ping type=vlan link=eth1 vid=10 # c" <-> row object
+// "eth2 addr=10.0.2.1/24 dhcp=a-b type=vlan link=eth1 vid=10 # c" <-> row object
 function parseIface(line) {
 	const [[name, ...kvs], comment] = parseRule(line);
-	const kv = Object.fromEntries(kvs.map(f => [f.slice(0, f.indexOf('=')), f.slice(f.indexOf('=') + 1)]));
+	const kv = parseKVs(kvs);
 	const mode = v => (v === undefined || v === 'proxmox') ? 'proxmox' : v === 'none' ? 'none' : 'static';
 	const [dhcpStart = '', dhcpEnd = ''] = (kv.dhcp || '').split('-');
 	return {
-		name, role: kv.role || 'off', comment,
+		name, comment,
 		addrMode: mode(kv.addr), addr: mode(kv.addr) === 'static' ? kv.addr : '',
 		addr6Mode: mode(kv.addr6), addr6: mode(kv.addr6) === 'static' ? kv.addr6 : '',
 		dhcpStart, dhcpEnd,
-		// without allow= everything is allowed (interfaces from the first boot)
-		allow: kv.allow === undefined ? [...ALLOW] : kv.allow === 'none' ? [] : kv.allow.split(','),
 		lease: kv.lease || '', dns: kv.dns || '',
 		gwMode: kv.gateway === undefined ? '' : kv.gateway === 'none' ? 'none' : 'ip',
 		gateway: kv.gateway && kv.gateway !== 'none' ? kv.gateway : '',
@@ -181,24 +180,75 @@ function parseIface(line) {
 		type: kv.type || '', link: kv.link || '', vid: kv.vid || '', ports: kv.ports || '',
 	};
 }
-function ifaceLine(r) {
-	const f = [r.name, `role=${r.role}`];
-	if (r.role !== 'wan') {
+function ifaceLine(r, wan) {
+	const f = [r.name];
+	if (r.name !== wan) {
 		if (r.addrMode !== 'proxmox') f.push(`addr=${r.addrMode === 'static' ? r.addr.trim() : 'none'}`);
 		if (r.addr6Mode !== 'proxmox') f.push(`addr6=${r.addr6Mode === 'static' ? r.addr6.trim() : 'none'}`);
-		if ((r.role === 'lan' || r.role === 'isolated') && (r.dhcpStart.trim() || r.dhcpEnd.trim())) {
+		if (r.dhcpStart.trim() || r.dhcpEnd.trim()) {
 			f.push(`dhcp=${r.dhcpStart.trim()}-${r.dhcpEnd.trim()}`);
 			if (r.lease.trim()) f.push(`lease=${r.lease.trim()}`);
 			if (r.dns.trim()) f.push(`dns=${r.dns.replace(/[\s,]+/g, ',').replace(/^,|,$/g, '')}`);
 			if (r.gwMode === 'none') f.push('gateway=none');
 			if (r.gwMode === 'ip' && r.gateway.trim()) f.push(`gateway=${r.gateway.trim()}`);
 		}
-		const allow = ALLOW.filter(a => r.allow.includes(a));
-		if (allow.length !== ALLOW.length) f.push(`allow=${allow.join(',') || 'none'}`);
 		if (r.type === 'vlan') f.push('type=vlan', `link=${r.link}`, `vid=${String(r.vid).trim()}`);
 		if (r.type === 'bridge') f.push('type=bridge', ...(r.ports ? [`ports=${r.ports}`] : []));
 	}
 	return f.join(' ') + (r.comment.trim() ? ` # ${r.comment.trim()}` : '');
+}
+
+// rules file lines: "input accept in=eth1 proto=tcp dport=22 # c",
+// "masquerade out=eth0", "dnat in=eth0 proto=tcp dport=443 to=192.168.10.10:8443".
+// In a row, proto "svc:ssh,webui" stands for service=ssh,webui.
+let ruleId = 1;
+const RULE_KINDS = ['input', 'forward', 'output', 'dnat', 'masquerade'];
+const RULE_TITLES = { input: 'To this firewall', forward: 'Forwarding', output: 'From this firewall', dnat: 'Port forwards', masquerade: 'NAT' };
+function newRule(kind, o = {}) {
+	return {
+		id: ruleId++, kind, action: ['input', 'output', 'forward'].includes(kind) ? 'accept' : '',
+		in: '', out: '', src: '', dst: '', proto: kind === 'dnat' ? 'tcp' : '', sport: '', dport: '',
+		toIp: '', toPort: '', comment: '', ...o,
+	};
+}
+function parseFwRule(line) {
+	const [[kind, ...rest], comment] = parseRule(line);
+	const action = ['input', 'output', 'forward'].includes(kind) ? rest.shift() : '';
+	const kv = parseKVs(rest);
+	const [toIp = '', toPort = ''] = (kv.to || '').split(':');
+	return newRule(kind, {
+		action, in: kv.in || '', out: kv.out || '', src: kv.src || '', dst: kv.dst || '',
+		proto: kv.service ? `svc:${kv.service}` : (kv.proto || ''), sport: kv.sport || '', dport: kv.dport || '',
+		toIp, toPort, comment,
+	});
+}
+// a comma list without blanks
+const list = v => String(v || '').split(/[\s,]+/).filter(Boolean).join(',');
+function fwRuleLine(r) {
+	const f = [r.kind];
+	if (r.action) f.push(r.action);
+	const add = (k, v) => { v = list(v); if (v) f.push(`${k}=${v}`); };
+	if (r.kind !== 'output' && r.kind !== 'masquerade') add('in', r.in);
+	if (r.kind !== 'input' && r.kind !== 'dnat') add('out', r.out);
+	add('src', r.src);
+	add('dst', r.dst);
+	if (r.proto.startsWith('svc:')) add('service', r.proto.slice(4));
+	else if (r.kind !== 'masquerade') {
+		add('proto', r.proto);
+		if (r.kind !== 'dnat') add('sport', r.sport);
+		add('dport', r.dport);
+	}
+	if (r.kind === 'dnat') f.push(`to=${r.toIp.trim()}${String(r.toPort).trim() ? `:${String(r.toPort).trim()}` : ''}`);
+	return f.join(' ') + (r.comment.trim() ? ` # ${r.comment.trim()}` : '');
+}
+const RULES_HEADER = [
+	'# Firewall rules, applied in this order. Edit in the web UI or here, then',
+	'# run: pxmxfw apply. Format: see /usr/lib/pxmxfw/lib.sh',
+];
+// A row of "Access to this firewall": input accept in=ONE service=LIST, nothing else
+function isAccess(r) {
+	return r.kind === 'input' && r.action === 'accept' && /^[^,\s]+$/.test(r.in) && r.proto.startsWith('svc:') &&
+		!r.src.trim() && !r.dst.trim();
 }
 
 // ---- web terminal ----
@@ -224,12 +274,10 @@ async function loadXterm() {
 	await loadScript('xterm-fit.js');
 }
 
-// A new interface: routed (role lan) and reachable only by ping, unless
-// the options say otherwise
 function newIface(name, o = {}) {
 	return {
-		name, role: 'lan', comment: '', addrMode: 'none', addr: '', addr6Mode: 'none', addr6: '',
-		dhcpStart: '', dhcpEnd: '', allow: ['ping'], type: '', link: '', vid: '', ports: '',
+		name, comment: '', addrMode: 'none', addr: '', addr6Mode: 'none', addr6: '',
+		dhcpStart: '', dhcpEnd: '', type: '', link: '', vid: '', ports: '',
 		lease: '', dns: '', gwMode: '', gateway: '', open: false, ...o,
 	};
 }
@@ -270,14 +318,22 @@ document.addEventListener('alpine:init', () => {
 		settings: {},
 		ifaces: [],
 		tunnels: [],
-		services: [],
-		forwards: [],
+		rules: [],
+		ruleTab: 'input',
 		hosts: [],
 		leases: [],
 		checks: [],
 		ctidValue: '',
 		subnetPool: '',
-		ALLOW,
+		SERVICES,
+		SERVICE_LABEL,
+		RULE_KINDS,
+		RULE_TITLES,
+		COL_LABEL: {
+			action: 'Action', in: 'In', out: 'Out', src: 'Source', dst: 'Destination', proto: 'Protocol',
+			dnatproto: 'Protocol', sport: 'Source port', dport: 'Dest. port', port: 'Port', toIp: 'To address',
+			toPort: 'To port', comment: 'Comment',
+		},
 		// the Add interface form
 		adding: null,
 
@@ -499,8 +555,8 @@ document.addEventListener('alpine:init', () => {
 				kv.features = Object.fromEntries(lines(st).filter(l => l.startsWith('feature='))
 					.map(l => l.slice(8).split(' ')).map(([f, v]) => [f, v === 'yes']));
 				kv.ifaces = lines(st).filter(l => l.startsWith('iface=')).map(l => {
-					const [name, role, state, pve4, pve6] = l.slice(6).split(' ');
-					return { name, role, state, pve4, pve6 };
+					const [name, kind, state, pve4, pve6] = l.slice(6).split(' ');
+					return { name, kind, state, pve4, pve6 };
 				});
 				this.status = kv;
 				this.checks = lines(ck).map(l => {
@@ -516,41 +572,57 @@ document.addEventListener('alpine:init', () => {
 
 		async loadConfig() {
 			try {
-				const [s, ifc, sv, fw, h, wg] = await Promise.all(['settings', 'interfaces', 'services', 'forwards', 'hosts', 'wireguard'].map(n => this.call('file', { name: n })));
+				const [s, ifc, rl, h, wg] = await Promise.all(['settings', 'interfaces', 'rules', 'hosts', 'wireguard'].map(n => this.call('file', { name: n })));
 				this.tunnels = parseWireguard(wg);
-				this.settings = parseKV(s);
+				this.settings = { WAN: 'eth0', OUTPUT_POLICY: 'accept', ...parseKV(s) };
 				this.ifaces = lines(ifc).map(parseIface);
 				for (const t of this.tunnels) {
 					if (!this.ifaces.some(r => r.name === t.name)) {
 						this.ifaces.push(newIface(t.name, { comment: 'WireGuard', addrMode: 'none' }));
 					}
 				}
-				this.services = lines(sv).map(parseRule).map(([[proto, port], comment]) => ({ proto, port, comment }));
-				this.forwards = lines(fw).map(parseRule).map(([[proto, wanport, lanip, lanport], comment]) => ({ proto, wanport, lanip, lanport, comment }));
+				this.rules = lines(rl).map(parseFwRule);
 				this.hosts = lines(h).map(parseRule).map(([[ip, name, mac], comment]) => ({ id: hostId++, ip, name, mac: mac || '', comment }));
 			} catch (e) {
 				this.show('fail', `Could not load the configuration: ${e.message}`);
 			}
 		},
 
+		// the rules in file order: grouped by kind, each kind in the order shown
+		orderedRules() { return RULE_KINDS.flatMap(k => this.rules.filter(r => r.kind === k)); },
 		files() {
 			const settings = '# pxmxfw settings. Edit in the web UI or here, then run: pxmxfw apply\n' +
 				SETTINGS_ORDER.map(k => `${k}=${(this.settings[k] || '').trim()}`).join('\n') + '\n';
+			// saved in this order: interfaces are checked against the settings
+			// (WAN), rules against the saved interfaces
 			return {
 				settings,
 				wireguard: wireguardFile(this.tunnels),
-				interfaces: ['# Network interfaces, see /usr/lib/pxmxfw/lib.sh for the format', ...this.ifaces.map(ifaceLine)].join('\n') + '\n',
-				services: ruleFile('# Open on WAN: tcp|udp PORT[-PORT] [# comment]', this.services, ['proto', 'port']),
-				forwards: ruleFile('# Port forwards: tcp|udp WANPORT LANIP LANPORT [# comment]', this.forwards, ['proto', 'wanport', 'lanip', 'lanport']),
+				interfaces: ['# Network interfaces, see /usr/lib/pxmxfw/lib.sh for the format', ...this.ifaces.map(r => ifaceLine(r, this.wan()))].join('\n') + '\n',
+				rules: [...RULES_HEADER, ...this.orderedRules().map(fwRuleLine)].join('\n') + '\n',
 				hosts: ruleFile('# Hosts: IP NAME [MAC] [# comment]', this.hosts.filter(h => h.name.trim()), ['ip', 'name', 'mac']),
 			};
+		},
+		// "line 5: dport: ..." in the rules file: say which rule that is
+		ruleError(msg) {
+			const rules = this.orderedRules();
+			return msg.replace(/^line (\d+): /gm, (m, n) => {
+				const r = rules[Number(n) - RULES_HEADER.length - 1];
+				if (!r) return m;
+				if (isAccess(r)) return `Access to this firewall, ${r.in}: `;
+				const same = rules.filter(x => x.kind === r.kind && !isAccess(x));
+				return `${RULE_TITLES[r.kind]}, rule ${same.indexOf(r) + 1}: `;
+			});
 		},
 
 		async saveApply() {
 			this.busy = true;
 			const errors = [];
 			for (const [name, body] of Object.entries(this.files())) {
-				try { await this.call('save', { name, body }); } catch (e) { errors.push(`${name}: ${e.message}`); break; }
+				try { await this.call('save', { name, body }); } catch (e) {
+					errors.push(name === 'rules' ? `Firewall rules:\n${this.ruleError(e.message)}` : `${name}: ${e.message}`);
+					break;
+				}
 			}
 			if (errors.length) {
 				this.show('fail', `Not saved, please fix:\n${errors.join('\n')}`);
@@ -594,6 +666,7 @@ document.addEventListener('alpine:init', () => {
 			const addr = await this.proposeAddr(name);
 			this.tunnels.push({ name, port: String(51820 + Number(name.slice(2))), public: '', comment: '', peers: [], export: '' });
 			this.ifaces.push(newIface(name, { comment: 'WireGuard', addrMode: addr ? 'static' : 'none', addr }));
+			this.defaultRules(name);
 		},
 
 		// ---- Add interface (VLAN, bridge, WireGuard tunnel) ----
@@ -602,12 +675,16 @@ document.addEventListener('alpine:init', () => {
 		vlanParents() {
 			return this.ifaces.filter(r => r.type !== 'vlan' && !this.bridgeOf(r.name) && !this.tunnels.some(t => t.name === r.name)).map(r => r.name);
 		},
-		// NICs free to join a new bridge: switched off, not WAN, in no bridge
-		bridgeCandidates() { return this.ifaces.filter(r => r.role === 'off' && r.type !== 'bridge' && !this.bridgeOf(r.name)).map(r => r.name); },
+		// NICs free to join a new bridge: not WAN, not a tunnel, in no bridge,
+		// and without an address pxmxfw sets
+		bridgeCandidates() {
+			return this.ifaces.filter(r => r.name !== this.wan() && r.type !== 'bridge' && !this.bridgeOf(r.name) &&
+				!this.tunnels.some(t => t.name === r.name) && r.addrMode !== 'static' && !r.dhcpStart).map(r => r.name);
+		},
 		bridgeOf(name) { return this.ifaces.find(r => r.type === 'bridge' && r.ports.split(',').includes(name)); },
 		async startAdd() {
 			const kind = this.feature('vlan') ? 'vlan' : this.feature('bridge') ? 'bridge' : 'wireguard';
-			const link = (this.ifaces.find(r => r.role === 'lan') || this.ifaces[0] || {}).name || 'eth1';
+			const link = (this.ifaces.find(r => r.name !== this.wan()) || this.ifaces[0] || {}).name || 'eth1';
 			this.adding = { kind, link, vid: '10', name: '', ports: [], addr: '', dhcp: false, comment: '' };
 			await this.addKind();
 		},
@@ -632,16 +709,20 @@ document.addEventListener('alpine:init', () => {
 			if (a.dhcp && a.addr) {
 				const n = network(a.addr);
 				r.dhcpStart = n2ip(n.base + 100); r.dhcpEnd = n2ip(n.base + 200);
-				r.allow = ['ping', 'dns', 'dhcp'];
 			}
-			// bridge ports carry no role of their own
-			for (const p of a.ports) this.ifaceOf(p).role = 'off';
+			// bridge ports carry no address of their own; their rules move to the bridge
+			for (const p of a.ports) {
+				Object.assign(this.ifaceOf(p), { addrMode: 'none', addr6Mode: 'none' });
+				this.renameInRules(p, r.name);
+			}
 			this.ifaces.push(r);
+			this.defaultRules(r.name);
 			this.adding = null;
 			this.show('ok', `${r.name} added. Click Save and apply to create it.`);
 		},
 		// ---- per-interface DHCP and DNS ----
-		inside(r) { return r.role === 'lan' || r.role === 'isolated'; },
+		// interfaces that can run DHCP and have rules: not the WAN, not a bridge port
+		inside(r) { return r.name !== this.wan() && !this.bridgeOf(r.name); },
 		// the interface's IPv4 subnet: its static address, else what it has now
 		subnetOf(r) {
 			const c = r.addrMode === 'static' && /\/\d+$/.test(r.addr) ? r.addr
@@ -683,13 +764,119 @@ document.addEventListener('alpine:init', () => {
 		},
 		removeHost(h) { this.hosts = this.hosts.filter(x => x !== h); },
 
-		removeIface(r) { this.ifaces = this.ifaces.filter(x => x !== r); },
-		toggleAllow(r, a, ev) {
-			r.allow = ev.target.checked ? [...new Set([...r.allow, a])] : r.allow.filter(x => x !== a);
-			if (a === 'webui' && !ev.target.checked && this.settings.WEBUI_WAN !== 'yes' &&
-				!this.ifaces.some(x => (x.role === 'lan' || x.role === 'isolated') && x.allow.includes('webui')))
-				this.show('warn', 'No interface allows the web UI now. After applying it can only be reached from inside the container.');
+		removeIface(r) {
+			this.ifaces = this.ifaces.filter(x => x !== r);
+			this.renameInRules(r.name, '');
 		},
+
+		// ---- firewall rules ----
+		wan() { return this.settings.WAN || 'eth0'; },
+		// NICs from Proxmox that can be the WAN
+		wanChoices() { return this.ifaces.filter(r => !r.type && !this.tunnels.some(t => t.name === r.name)).map(r => r.name); },
+		// interfaces rules can name (bridge ports pass traffic as their bridge)
+		ruleIfaces() { return this.ifaces.filter(r => !this.bridgeOf(r.name)).map(r => r.name); },
+		rulesOf(kind) { return this.rules.filter(r => r.kind === kind && !isAccess(r)); },
+		// the columns of the rule table shown
+		cols() {
+			return {
+				input: ['action', 'in', 'src', 'dst', 'proto', 'sport', 'dport', 'comment'],
+				forward: ['action', 'in', 'out', 'src', 'dst', 'proto', 'sport', 'dport', 'comment'],
+				output: ['action', 'out', 'dst', 'proto', 'sport', 'dport', 'comment'],
+				dnat: ['in', 'dnatproto', 'port', 'toIp', 'toPort', 'src', 'dst', 'comment'],
+				masquerade: ['out', 'src', 'dst', 'comment'],
+			}[this.ruleTab];
+		},
+		ruleHelp() {
+			return {
+				input: 'Traffic to the firewall itself, besides the services above. Anything no rule accepts is dropped.',
+				forward: 'Traffic the firewall routes from one interface to another. Anything no rule accepts is dropped; replies to accepted connections and port forwards always pass.',
+				output: `Traffic the firewall itself sends. Anything no rule matches is ${this.settings.OUTPUT_POLICY === 'drop' ? 'dropped' : 'accepted'} (see General below).`,
+				dnat: 'Connections to a port on an interface go to a machine behind the firewall. Destination limits it to one of the firewall\'s addresses. They pass without a forwarding rule. IPv4 only.',
+				masquerade: 'Traffic leaving an interface gets that interface\'s address (NAT), so machines behind the firewall can reach the internet. IPv4 only.',
+			}[this.ruleTab];
+		},
+		addRule(kind) {
+			const o = kind === 'dnat' ? { in: this.wan() } : kind === 'masquerade' ? { out: this.wan() } : {};
+			this.rules.push(newRule(kind, o));
+		},
+		removeRule(r) { this.rules = this.rules.filter(x => x !== r); },
+		// move a rule up or down among the rules of its table
+		moveRule(r, dir) {
+			const same = this.rulesOf(r.kind);
+			const other = same[same.indexOf(r) + dir];
+			if (!other) return;
+			const i = this.rules.indexOf(r), j = this.rules.indexOf(other);
+			[this.rules[i], this.rules[j]] = [other, r];
+		},
+		// protocol choices of a rule, keeping an unusual service list it already has
+		protoOptions(r) {
+			const o = [['', 'any'], ['tcp', 'TCP'], ['udp', 'UDP'], ['tcp,udp', 'TCP and UDP'], ['icmp', 'ICMP']];
+			if (r.kind === 'input') {
+				for (const s of SERVICES) o.push([`svc:${s}`, `service: ${SERVICE_LABEL[s]}`]);
+				if (r.proto.startsWith('svc:') && !o.some(x => x[0] === r.proto)) o.push([r.proto, `service: ${r.proto.slice(4)}`]);
+			}
+			return o;
+		},
+		ports(r) { return ['tcp', 'udp', 'tcp,udp'].includes(r.proto); },
+		// a plain-language line under each rule
+		describe(r) {
+			const any = (v, all) => list(v) ? list(v).replaceAll(',', ', ') : all;
+			const what = r.proto.startsWith('svc:') ? r.proto.slice(4).split(',').map(s => SERVICE_LABEL[s] || s).join(', ')
+				: !r.proto ? 'all traffic' : `${r.proto.replace(',', '/').toUpperCase()}${list(r.dport) ? ` to port ${any(r.dport)}` : ''}`;
+			const from = `${any(r.src, 'anywhere')}${r.in ? ` on ${any(r.in)}` : ''}`;
+			switch (r.kind) {
+				case 'input': return `${r.action} ${what} from ${from} to this firewall`;
+				case 'output': return `${r.action} ${what} from this firewall to ${any(r.dst, 'anywhere')}${r.out ? ` via ${any(r.out)}` : ''}`;
+				case 'forward': return `${r.action} ${what} from ${from} to ${any(r.dst, 'anywhere')}${r.out ? ` via ${any(r.out)}` : ''}`;
+				case 'dnat': return `${(r.proto || '').toUpperCase()} port ${r.dport || '?'} on ${any(r.in, '?')} goes to ${r.toIp || '?'}${r.toPort ? `:${r.toPort}` : ''}`;
+				case 'masquerade': return `traffic from ${any(r.src, 'anywhere')} leaving ${any(r.out, '?')} gets its address`;
+			}
+			return '';
+		},
+		// Access to this firewall: which services each interface reaches
+		access(name) { return this.rules.find(r => isAccess(r) && r.in === name); },
+		accessHas(name, svc) {
+			const r = this.access(name);
+			return !!r && r.proto.slice(4).split(',').includes(svc);
+		},
+		// DHCP ranges let DHCP and DNS in on their interface anyway
+		accessImplied(name, svc) { return (svc === 'dhcp' || svc === 'dns') && !!this.ifaceOf(name).dhcpStart; },
+		toggleAccess(name, svc, ev) {
+			let r = this.access(name);
+			const have = r ? r.proto.slice(4).split(',') : [];
+			const want = SERVICES.filter(s => s === svc ? ev.target.checked : have.includes(s));
+			if (!r && want.length) {
+				// after the other input rules of the table, so earlier drops still win
+				r = newRule('input', { in: name });
+				this.rules.push(r);
+			}
+			if (r && want.length) r.proto = `svc:${want.join(',')}`;
+			if (r && !want.length) this.removeRule(r);
+			if (svc === 'webui' && !ev.target.checked && !this.webuiReachable())
+				this.show('warn', 'No rule lets an interface reach the web UI now. After applying it can only be reached from inside the container.');
+		},
+		// some rule accepts the web UI, from interfaces in names (all when empty)
+		webuiReachable(names) {
+			return this.rules.some(r => r.kind === 'input' && r.action === 'accept' &&
+				(r.proto.split(':')[1] || '').split(',').includes('webui') &&
+				(!names || !r.in || list(r.in).split(',').some(i => names.includes(i))));
+		},
+		// a new interface reaches WAN and answers ping, like the LAN at first boot
+		defaultRules(name) {
+			this.rules.push(newRule('input', { in: name, proto: 'svc:ping' }));
+			this.rules.push(newRule('forward', { in: name, out: this.wan(), comment: `${name} to WAN` }));
+		},
+		// NAME becomes TO in every rule. With TO empty, NAME leaves the rules, and
+		// a rule that named only NAME as in= or out= goes (it would match any)
+		renameInRules(name, to) {
+			const fix = v => [...new Set(list(v).split(',').filter(Boolean).map(x => x === name ? to : x).filter(Boolean))].join(',');
+			this.rules = this.rules.filter(r => {
+				const inHad = list(r.in).split(',').includes(name), outHad = list(r.out).split(',').includes(name);
+				r.in = fix(r.in); r.out = fix(r.out);
+				return !((inHad && !r.in) || (outHad && !r.out));
+			});
+		},
+
 		termOpen: false,
 		termNote: '',
 		async openTerminal() {
@@ -762,7 +949,7 @@ document.addEventListener('alpine:init', () => {
 				const own = this.ifaceOf(t.name).addr;
 				const net = network(own);
 				// the tunnel subnet and the lans behind this firewall
-				const lans = [...new Set(this.ifaces.filter(r => r.role === 'lan' && r.name !== t.name)
+				const lans = [...new Set(this.ifaces.filter(r => this.inside(r) && r.name !== t.name)
 					.flatMap(r => {
 						const live = this.status.addrs.filter(a => a[0] === r.name && !a[1].includes(':')).map(a => a[1]);
 						return live.length ? live : (r.addrMode === 'static' && r.addr ? [r.addr] : []);

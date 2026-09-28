@@ -67,7 +67,7 @@
 			<span x-text="failedChecks.length + ' check(s) failed, so the firewall may not work.'"></span>
 			<button class="link" @click="tab = 'checks'">Open checks</button>
 		</div>
-		<div class="banner warn" x-show="settings.WEBUI_WAN === 'yes'" x-cloak>
+		<div class="banner warn" x-show="webuiReachable([wan()])" x-cloak>
 			The web UI is reachable from WAN. Turn this off under Firewall once the LAN side works.
 		</div>
 		<div class="cards">
@@ -78,11 +78,11 @@
 		</div>
 		<h2>Interfaces</h2>
 		<table>
-			<tr><th>Interface</th><th>Role</th><th>Addresses</th></tr>
+			<tr><th>Interface</th><th>Kind</th><th>Addresses</th></tr>
 			<template x-for="i in status.ifaces" :key="i.name">
 				<tr>
 					<td x-text="i.name"></td>
-					<td><span x-text="i.role"></span><span class="badge fail" x-show="i.state === 'missing'">missing</span></td>
+					<td><span x-text="i.kind"></span><span class="badge fail" x-show="i.state === 'missing'">missing</span></td>
 					<td x-text="addrsOf(i.name) || '-'"></td>
 				</tr>
 			</template>
@@ -94,38 +94,33 @@
 	<section x-show="tab === 'interfaces'">
 		<h2>Interfaces</h2>
 		<p class="muted">
-			The WAN (eth0) gets its address from Proxmox. NICs you add to the container in Proxmox show up here switched off; give them a role to use them.
-			Interfaces you add here start as <b>lan</b>.
-			<b>lan</b> reaches WAN and the other lans, <b>isolated</b> reaches WAN only, <b>off</b> drops everything.
-			<b>Allows</b> is what an interface may reach on the firewall itself. <b>DHCP &amp; DNS</b> sets the address range, lease time,
-			DNS servers and fixed addresses of a lan or isolated interface.
+			The WAN gets its address from Proxmox. NICs you add to the container in Proxmox show up here; nothing passes through them
+			until rules under <a href="#" @click.prevent="tab = 'firewall'">Firewall</a> allow it.
+			<b>DHCP &amp; DNS</b> sets the address range, lease time, DNS servers and fixed addresses of an interface.
 		</p>
 		<table class="ifaces">
-			<thead><tr><th>Interface</th><th>Role</th><th>IPv4</th><th x-show="ipv6()">IPv6</th><th>DHCP</th><th>Allows</th><th>Comment</th><th></th></tr></thead>
+			<thead><tr><th>Interface</th><th>IPv4</th><th x-show="ipv6()">IPv6</th><th>DHCP</th><th>Comment</th><th></th></tr></thead>
 			<template x-for="r in ifaces" :key="r.name">
 				<tbody>
 				<tr>
 					<td>
-						<b x-text="r.name"></b>
+						<b x-text="r.name"></b> <span class="badge warn" x-show="r.name === wan()">WAN</span>
 						<div class="hint" x-show="r.type === 'vlan'" x-text="`VLAN ${r.vid} on ${r.link}`"></div>
 						<div class="hint" x-show="r.type === 'bridge'" x-text="`bridge: ${r.ports.split(',').filter(Boolean).join(', ') || 'no ports'}`"></div>
 						<div class="hint" x-show="bridgeOf(r.name)" x-text="`port of ${(bridgeOf(r.name) || {}).name}`"></div>
 						<div class="hint" x-text="nowOf(r)"></div>
 					</td>
 					<td>
-						<span x-show="r.role === 'wan'">wan</span>
-						<select x-show="r.role !== 'wan'" x-model="r.role"><option>lan</option><option>isolated</option><option>off</option></select>
-					</td>
-					<td>
-						<span x-show="r.role === 'wan'">from Proxmox</span>
-						<div x-show="r.role !== 'wan'" class="addr">
+						<span x-show="r.name === wan()">from Proxmox</span>
+						<span x-show="bridgeOf(r.name)">on the bridge</span>
+						<div x-show="inside(r)" class="addr">
 							<select x-model="r.addrMode"><option value="proxmox">from Proxmox</option><option value="static">static</option><option value="none">none</option></select>
 							<input x-show="r.addrMode === 'static'" x-model="r.addr" placeholder="192.168.20.1/24">
 						</div>
 					</td>
 					<td x-show="ipv6()">
-						<span x-show="r.role === 'wan'">from Proxmox</span>
-						<div x-show="r.role !== 'wan'" class="addr">
+						<span x-show="r.name === wan()">from Proxmox</span>
+						<div x-show="inside(r)" class="addr">
 							<select x-model="r.addr6Mode"><option value="proxmox">from Proxmox</option><option value="static">static</option><option value="none">none</option></select>
 							<input x-show="r.addr6Mode === 'static'" x-model="r.addr6" placeholder="fd00:20::1/64">
 						</div>
@@ -136,18 +131,11 @@
 							<div><button class="link" @click="r.open = !r.open" x-text="r.open ? 'Hide' : 'DHCP & DNS'"></button></div>
 						</div>
 					</td>
-					<td>
-						<div x-show="r.role === 'lan' || r.role === 'isolated'" class="allow">
-							<template x-for="a in ALLOW" :key="a">
-								<label class="check"><input type="checkbox" :checked="r.allow.includes(a)" @change="toggleAllow(r, a, $event)"> <span x-text="a === 'webui' ? 'web UI' : a"></span></label>
-							</template>
-						</div>
-					</td>
 					<td><input x-model="r.comment"></td>
 					<td><button class="link" x-show="r.type" @click="removeIface(r)">Remove</button></td>
 				</tr>
 				<tr x-show="r.open && inside(r)" class="detail">
-					<td :colspan="ipv6() ? 8 : 7">
+					<td :colspan="ipv6() ? 6 : 5">
 						<div class="form">
 							<label class="check"><input type="checkbox" :checked="!!(r.dhcpStart || r.dhcpEnd)" @change="toggleDhcp(r, $event)"> Hand out addresses (DHCP)</label>
 						</div>
@@ -189,7 +177,7 @@
 				</tbody>
 			</template>
 		</table>
-		<p class="muted" x-show="!settings.DNSMASQ || settings.DNSMASQ === 'no'">DHCP is handed out once dnsmasq is turned on under DNS &amp; DHCP. A DHCP range also allows DNS and DHCP.</p>
+		<p class="muted" x-show="!settings.DNSMASQ || settings.DNSMASQ === 'no'">DHCP is handed out once dnsmasq is turned on under DNS &amp; DHCP. A DHCP range also lets DNS and DHCP in on its interface.</p>
 
 		<div class="actions" x-show="!adding"><button @click="startAdd()">Add interface</button></div>
 		<div class="form card" x-show="adding">
@@ -214,7 +202,7 @@
 					</template>
 					<template x-if="adding.kind === 'bridge'">
 						<div>
-							<p class="hint">Ports: NICs that are switched off. They join the bridge and the bridge gets the role and address.</p>
+							<p class="hint">Ports: NICs without an address set here. They join the bridge; the bridge gets the address and their rules.</p>
 							<template x-for="n in bridgeCandidates()" :key="n">
 								<label class="check"><input type="checkbox" :value="n" x-model="adding.ports"> <span x-text="n"></span></label>
 							</template>
@@ -229,7 +217,7 @@
 						</div>
 					</template>
 					<p class="hint" x-show="adding.kind === 'wireguard'">Adds a tunnel and opens the WireGuard page to set it up.</p>
-					<p class="hint">It starts as <b>lan</b> (routed to the other lans and WAN) and answers ping only; change that in the table.</p>
+					<p class="hint">It gets rules to reach WAN and to ping the firewall; change them under Firewall.</p>
 					<div class="actions">
 						<button class="primary" @click="finishAdd()">Add</button>
 						<button @click="adding = null">Cancel</button>
@@ -253,44 +241,92 @@
 
 	<!-- Firewall -->
 	<section x-show="tab === 'firewall'">
+		<h2>Access to this firewall</h2>
+		<p class="muted">
+			Which interfaces reach the firewall's own services. For finer control (only from some addresses, other ports)
+			add rules under <b>To this firewall</b> below. A DHCP range on an interface always lets DHCP and DNS in there.
+		</p>
+		<table class="access">
+			<tr><th>Interface</th><template x-for="s in SERVICES" :key="s"><th x-text="SERVICE_LABEL[s]"></th></template></tr>
+			<template x-for="n in ruleIfaces()" :key="n">
+				<tr>
+					<td><b x-text="n"></b> <span class="badge warn" x-show="n === wan()">WAN</span></td>
+					<template x-for="s in SERVICES" :key="s">
+						<td><input type="checkbox" :checked="accessHas(n, s) || accessImplied(n, s)" :disabled="accessImplied(n, s)"
+							:title="accessImplied(n, s) ? 'Allowed by the DHCP range of this interface' : ''" @change="toggleAccess(n, s, $event)"></td>
+					</template>
+				</tr>
+			</template>
+		</table>
+
+		<h2>Rules</h2>
+		<div class="subtabs">
+			<template x-for="k in RULE_KINDS" :key="k">
+				<button :class="{ active: ruleTab === k }" @click="ruleTab = k">
+					<span x-text="RULE_TITLES[k]"></span> <span class="muted" x-text="rulesOf(k).length"></span>
+				</button>
+			</template>
+		</div>
+		<p class="muted" x-text="ruleHelp()"></p>
+		<datalist id="iface-list"><template x-for="n in ruleIfaces()" :key="n"><option :value="n"></option></template></datalist>
+		<table class="rules" x-show="rulesOf(ruleTab).length">
+			<thead><tr><th></th><template x-for="c in cols()" :key="c"><th x-text="COL_LABEL[c]"></th></template><th></th></tr></thead>
+			<template x-for="(r, i) in rulesOf(ruleTab)" :key="r.id">
+				<tbody>
+					<tr>
+						<td class="muted" x-text="i + 1"></td>
+						<template x-for="c in cols()" :key="c">
+							<td>
+								<template x-if="c === 'action'">
+									<select x-model="r.action"><option>accept</option><option>drop</option><option>reject</option></select>
+								</template>
+								<template x-if="c === 'in' || c === 'out'"><input x-model="r[c]" list="iface-list" placeholder="any"></template>
+								<template x-if="c === 'src' || c === 'dst'"><input x-model="r[c]" placeholder="any"></template>
+								<template x-if="c === 'proto'">
+									<select @change="r.proto = $event.target.value === 'any' ? '' : $event.target.value">
+										<template x-for="o in protoOptions(r)" :key="o[0]"><option :value="o[0] || 'any'" x-text="o[1]" :selected="o[0] === r.proto"></option></template>
+									</select>
+								</template>
+								<template x-if="c === 'dnatproto'">
+									<select x-model="r.proto"><option value="tcp">TCP</option><option value="udp">UDP</option></select>
+								</template>
+								<template x-if="c === 'sport' || c === 'dport'"><input x-model="r[c]" :disabled="!ports(r)" :placeholder="ports(r) ? 'any' : '-'"></template>
+								<template x-if="c === 'port'"><input x-model="r.dport" placeholder="443 or 60000-60100"></template>
+								<template x-if="c === 'toIp'"><input x-model="r.toIp" placeholder="192.168.10.10"></template>
+								<template x-if="c === 'toPort'"><input x-model="r.toPort" placeholder="same"></template>
+								<template x-if="c === 'comment'"><input x-model="r.comment"></template>
+							</td>
+						</template>
+						<td class="nowrap">
+							<button class="link" title="Move up" :disabled="i === 0" @click="moveRule(r, -1)">&uarr;</button>
+							<button class="link" title="Move down" :disabled="i === rulesOf(ruleTab).length - 1" @click="moveRule(r, 1)">&darr;</button>
+							<button class="link" @click="removeRule(r)">Remove</button>
+						</td>
+					</tr>
+					<tr class="desc"><td></td><td :colspan="cols().length + 1" class="hint" x-text="describe(r)"></td></tr>
+				</tbody>
+			</template>
+		</table>
+		<p class="muted" x-show="!rulesOf(ruleTab).length">No rules here yet.</p>
+		<button @click="addRule(ruleTab)">Add rule</button>
+		<p class="hint">
+			Interfaces, addresses and ports take comma lists (eth1, eth2 / 10.0.0.0/8, 192.168.1.5 / 22, 8000-8100); empty means any.
+			Rules are checked top to bottom and the first one that matches decides.
+		</p>
+
 		<h2>General</h2>
 		<div class="form">
-			<label class="check"><input type="checkbox" :checked="settings.NAT === 'yes'" @change="yn('NAT', $event)"> NAT (masquerade out of WAN)</label>
-			<label class="check"><input type="checkbox" :checked="settings.WAN_PING === 'yes'" @change="yn('WAN_PING', $event)"> Answer ping on WAN</label>
+			<label>WAN interface (address from Proxmox)
+				<select x-model="settings.WAN">
+					<template x-for="n in wanChoices()" :key="n"><option :value="n" x-text="n" :selected="n === wan()"></option></template>
+				</select>
+			</label>
+			<label>Traffic from this firewall that no rule matches
+				<select x-model="settings.OUTPUT_POLICY"><option value="accept">accept</option><option value="drop">drop</option></select>
+			</label>
 			<label>Web UI port <input type="number" min="1" max="65535" x-model="settings.WEBUI_PORT"></label>
-			<label class="check"><input type="checkbox" :checked="settings.WEBUI_WAN === 'yes'" @change="yn('WEBUI_WAN', $event)"> Allow the web UI from WAN</label>
 		</div>
-		<p class="muted">What lan and isolated interfaces may reach on the firewall itself (ping, SSH, DNS, DHCP, the web UI) is set per interface under Interfaces. Everything else coming in from WAN is dropped unless listed below.</p>
-
-		<h2>Open on WAN</h2>
-		<table>
-			<tr><th>Protocol</th><th>Port</th><th>Comment</th><th></th></tr>
-			<template x-for="(r, i) in services" :key="i">
-				<tr>
-					<td><select x-model="r.proto"><option>tcp</option><option>udp</option></select></td>
-					<td><input x-model="r.port" placeholder="22 or 60000-60100"></td>
-					<td><input x-model="r.comment"></td>
-					<td><button class="link" @click="services.splice(i, 1)">Remove</button></td>
-				</tr>
-			</template>
-		</table>
-		<button @click="services.push({ proto: 'tcp', port: '', comment: '' })">Add service</button>
-
-		<h2>Port forwards</h2>
-		<table>
-			<tr><th>Protocol</th><th>WAN port</th><th>LAN address</th><th>LAN port</th><th>Comment</th><th></th></tr>
-			<template x-for="(r, i) in forwards" :key="i">
-				<tr>
-					<td><select x-model="r.proto"><option>tcp</option><option>udp</option></select></td>
-					<td><input x-model="r.wanport" size="6"></td>
-					<td><input x-model="r.lanip" placeholder="192.168.10.10"></td>
-					<td><input x-model="r.lanport" size="6"></td>
-					<td><input x-model="r.comment"></td>
-					<td><button class="link" @click="forwards.splice(i, 1)">Remove</button></td>
-				</tr>
-			</template>
-		</table>
-		<button @click="forwards.push({ proto: 'tcp', wanport: '', lanip: '', lanport: '', comment: '' })">Add forward</button>
+		<p class="muted">Traffic to the firewall and routed traffic that no rule accepts is always dropped. Replies to allowed connections, ICMPv6 and the WireGuard ports always pass.</p>
 		<div class="actions"><button class="primary" :disabled="busy" @click="saveApply()">Save and apply</button></div>
 	</section>
 
@@ -304,7 +340,7 @@
 			<label>Default DHCP lease time <input x-model="settings.DHCP_LEASE" placeholder="12h"></label>
 		</div>
 		<p class="muted">
-			These settings apply to all interfaces. dnsmasq answers DNS on lan and isolated interfaces that allow it.
+			These settings apply to all interfaces. dnsmasq answers DNS and DHCP on interfaces with a DHCP range, or that a firewall rule lets reach DNS or DHCP.
 			DHCP ranges, lease times, DNS servers handed out and fixed addresses are set per interface under
 			<a href="#" @click.prevent="tab = 'interfaces'">Interfaces</a> (DHCP &amp; DNS).
 		</p>
@@ -330,8 +366,8 @@
 	<section x-show="tab === 'wireguard'">
 		<h2>WireGuard tunnels</h2>
 		<p class="muted">
-			Each tunnel is an interface with a role, like a NIC. With role <b>lan</b>, the networks behind its peers and your other lans reach each other,
-			which is how you join Proxmox nodes or sites. Peers' allowed networks are routed into the tunnel (never a default route).
+			Each tunnel is an interface like a NIC: rules under <a href="#" @click.prevent="tab = 'firewall'">Firewall</a> say what passes through it.
+			Forwarding rules between a tunnel and your LANs join Proxmox nodes or sites. Peers' allowed networks are routed into the tunnel (never a default route).
 		</p>
 		<template x-for="(t, ti) in tunnels" :key="t.name">
 			<div class="tunnel">
@@ -343,9 +379,6 @@
 				<div class="form">
 					<label>Listen port <input type="number" min="1" max="65535" x-model="t.port"></label>
 					<label>Tunnel address <input x-model="ifaceOf(t.name).addr" @input="ifaceOf(t.name).addrMode = 'static'" placeholder="10.99.0.1/24"></label>
-					<label>Role
-						<select x-model="ifaceOf(t.name).role"><option>lan</option><option>isolated</option><option>off</option></select>
-					</label>
 					<label>Public endpoint (how peers reach this firewall) <input x-model="t.public" placeholder="fw1.example.com:51820"></label>
 				</div>
 				<p>

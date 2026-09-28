@@ -1,0 +1,11 @@
+# Firewall rules, applied in this order. Edit in the web UI or here, then
+# run: pxmxfw apply. Format (see /usr/lib/pxmxfw/lib.sh):
+#   input|output|forward accept|drop|reject [in=IF] [out=IF] [src=NET] [dst=NET]
+#       [proto=tcp|udp|tcp,udp|icmp] [sport=PORT] [dport=PORT] [service=ping,ssh,dns,dhcp,webui]
+#   masquerade out=IF [src=NET]
+#   dnat in=IF proto=tcp|udp dport=PORT to=IP[:PORT] [src=NET]
+# On the first start pxmxfw writes these defaults for the NICs it finds.
+input accept in=eth0 service=ping # ping on WAN
+input accept in=eth1 service=ping,ssh,dns,dhcp,webui # the LAN reaches the firewall
+forward accept in=eth1 out=eth0 # LAN to WAN
+masquerade out=eth0 # NAT out of WAN

@@ -104,22 +104,24 @@ defaults to `/etc/pxmxfw`:
 - `eth0` (net0) is the WAN. Its address always comes from Proxmox.
 - `eth1` (net1) is a LAN. If it has a static address, the DHCP range
   defaults to `.100` to `.200` of its subnet.
+- Rules: the LAN reaches the WAN (with NAT) and every service of the
+  firewall (ping, SSH, DNS, DHCP, web UI); the WAN only gets ping answered.
 - dnsmasq (DNS and DHCP) and IPv6 routing stay off until you turn them on.
-- With only one NIC, the web UI is allowed on the WAN side so you can
-  finish the setup; turn that off once a LAN exists.
+- With only one NIC, a rule allows the web UI on the WAN side so you can
+  finish the setup; remove it once a LAN exists.
 
 NICs you add later (`pct set 200 -net2 name=eth2,bridge=vmbr2`) are found at
-the next start or when you open the web UI, and start with `role=off`.
+the next start or when you open the web UI. No rule names them, so nothing
+passes through them until you add rules.
 
 ### VLANs, bridges and tunnels
 
 **Add interface** on the Interfaces page creates a VLAN (on a NIC, with an
-802.1Q ID), a bridge (joining NICs that are switched off) or a WireGuard
-tunnel. A new interface starts as `lan`, so it is routed to the other lans
-and to WAN, answers ping and reaches nothing else on the firewall. It gets
-the first free /24 of the subnet pool (`10.20.0.0/16` unless you change it
-there). Tick DHCP to hand out `.100` to `.200`, which also allows DNS and
-DHCP.
+802.1Q ID), a bridge (joining NICs without an address) or a WireGuard
+tunnel. A new interface gets two rules: it reaches the WAN, and it can ping
+the firewall. It gets the first free /24 of the subnet pool (`10.20.0.0/16`
+unless you change it there). Tick DHCP to hand out `.100` to `.200`, which
+also lets DNS and DHCP in on that interface.
 
 VLANs need the `8021q` module and bridges the `bridge` module on the
 Proxmox host. A kind whose module is not loaded is greyed out, and the
@@ -131,9 +133,14 @@ Open `https://<LAN address>:8443` and log in as `root` (or a member of the
 `pxmxfw` group) with that user's password. It has:
 
 - **Status**: firewall, dnsmasq, forwarding, interfaces and addresses.
-- **Interfaces**: role of each NIC, addresses for NICs Proxmox does not
-  configure, DHCP ranges, and the IPv6 switch.
-- **Firewall**: NAT, ping, ports open on WAN, port forwards.
+- **Interfaces**: addresses for NICs Proxmox does not configure, VLANs,
+  bridges, DHCP ranges, and the IPv6 switch.
+- **Firewall**: which interfaces reach the firewall's own services (ping,
+  SSH, DNS, DHCP, web UI, as a grid), and rule tables: to this firewall,
+  forwarding between interfaces, from this firewall, port forwards and NAT.
+  Each rule matches on in and out interface, source and destination
+  address or network, protocol, and source and destination port. See
+  [Firewall rules](#firewall-rules).
 - **DNS & DHCP**: global settings: turn dnsmasq on, upstream servers, the
   local domain, the default lease time, and names outside your subnets.
   Per interface (Interfaces, *DHCP & DNS*): the DHCP range, lease time, DNS
@@ -183,7 +190,8 @@ The UI is served by `pxmxfw-webui`, a small Go server (source in `webui/`).
 - The UI's own state (sessions, TOTP secrets, token hashes, preferences, the
   change log) is in SQLite at `/var/lib/pxmxfw/webui.db`. The firewall
   config stays in `/etc/pxmxfw`.
-- It only listens on the LAN address. Every change also needs an `X-Pxmxfw`
+- It only listens on the address of the interface the rules let reach it
+  (on all addresses when rules let more than one interface reach it). Every change also needs an `X-Pxmxfw`
   header (tokens aside), so other web pages cannot make a logged-in browser
   change anything.
 
@@ -191,16 +199,18 @@ Example with a token:
 
 ```sh
 T=pxm_...
-curl -k -H "Authorization: Bearer $T" 'https://192.168.10.1:8443/api?action=file&name=services'
-curl -k -H "Authorization: Bearer $T" --data-binary @services 'https://192.168.10.1:8443/api?action=save&name=services'
+curl -k -H "Authorization: Bearer $T" 'https://192.168.10.1:8443/api?action=file&name=rules'
+curl -k -H "Authorization: Bearer $T" --data-binary @rules 'https://192.168.10.1:8443/api?action=save&name=rules'
 curl -k -H "Authorization: Bearer $T" -X POST 'https://192.168.10.1:8443/api?action=apply'
 ```
 
 ## WireGuard
 
-Tunnels are interfaces with the same roles as NICs, so a tunnel with role
-`lan` joins the networks behind its peers with your other lans. That is how
-you connect Proxmox nodes, sites or external machines. On the WireGuard page:
+Tunnels are interfaces like NICs, so firewall rules say what passes through
+them. Forwarding rules between a tunnel and your LANs (for example
+`forward accept in=eth1,wg0 out=eth1,wg0`) join the networks behind its
+peers with yours. That is how you connect Proxmox nodes, sites or external
+machines. On the WireGuard page:
 
 1. **Add tunnel** creates `wg0` with a port and a tunnel address
    (10.99.0.1/24 by default). Fill in the public endpoint (the host and port
@@ -236,20 +246,65 @@ dnsmasq config. Nothing else needs editing.
 
 | File | Content |
 | --- | --- |
-| `pxmxfw.conf` | `KEY=value` settings: `NAT`, `WAN_PING`, `IPV6`, `WEBUI_PORT`, `WEBUI_WAN`, `DNSMASQ`, `DNS_UPSTREAM`, `DNS_DOMAIN`, `DHCP_LEASE` |
-| `interfaces` | `IFACE role=wan\|lan\|isolated\|off [addr=proxmox\|none\|IP/PREFIX] [addr6=...] [dhcp=START-END] [lease=TIME] [dns=IP,IP] [gateway=IP\|none] [allow=ping,ssh,dns,dhcp,webui\|none] [type=vlan link=IFACE vid=N \| type=bridge ports=IFACE,...]` |
-| `services` | `tcp\|udp PORT[-PORT]`: open on WAN to the firewall itself |
-| `forwards` | `tcp\|udp WANPORT LANIP LANPORT`: port forwards |
+| `pxmxfw.conf` | `KEY=value` settings: `WAN` (default `eth0`), `OUTPUT_POLICY` (`accept` or `drop`), `IPV6`, `WEBUI_PORT`, `DNSMASQ`, `DNS_UPSTREAM`, `DNS_DOMAIN`, `DHCP_LEASE` |
+| `interfaces` | `IFACE [addr=proxmox\|none\|IP/PREFIX] [addr6=...] [dhcp=START-END] [lease=TIME] [dns=IP,IP] [gateway=IP\|none] [type=vlan link=IFACE vid=N \| type=bridge ports=IFACE,...]` |
+| `rules` | firewall rules, see below |
 | `hosts` | `IP NAME [MAC]`: local DNS names, fixed DHCP leases with a MAC |
 | `wireguard` | `tunnel NAME port=PORT [public=HOST:PORT]` then `peer NAME key=PUBKEY allowed=CIDR[,CIDR] [endpoint=HOST:PORT] [keepalive=S]` |
 | `wg/NAME.key` | a tunnel's private key, created on the first apply |
 
-Roles: `lan` reaches the WAN and every other `lan`; `isolated` reaches the
-WAN only; `off` drops everything. `allow` is what a `lan` or `isolated`
-interface may reach on the firewall itself; without it, everything (how the
-LAN from the first boot starts). VLANs and bridges are created by `pxmxfw
-apply` and removed again when their line is removed. With `IPV6=no` (the default) only IPv4 is
-forwarded.
+Interfaces have no role: the `rules` file decides what passes. The WAN only
+differs in that Proxmox sets its address and it runs no DHCP server. VLANs
+and bridges are created by `pxmxfw apply` and removed again when their line
+is removed; a bridge's ports carry no address, and rules name the bridge.
+
+### Firewall rules
+
+`/etc/pxmxfw/rules` has one rule per line, checked in order; the first rule
+that matches decides.
+
+```
+input|output|forward accept|drop|reject [in=IF] [out=IF] [src=NET] [dst=NET]
+    [proto=tcp|udp|tcp,udp|icmp] [sport=PORT] [dport=PORT] [service=LIST]
+masquerade out=IF [src=NET] [dst=NET]
+dnat in=IF proto=tcp|udp dport=PORT to=IP[:PORT] [src=NET] [dst=NET]
+```
+
+- `input` is traffic to the firewall itself, `forward` traffic it routes
+  from one interface to another, `output` traffic it sends.
+- `in` and `out` are interfaces, `src` and `dst` IPv4 or IPv6 addresses or
+  networks (`10.0.0.0/8`), `sport` and `dport` ports or ranges
+  (`8000-8100`). Each takes a comma list; a field left out matches
+  anything.
+- `service=` (input only) names services of the firewall instead of
+  protocol and port: `ping`, `ssh`, `dns`, `dhcp`, `webui` (`WEBUI_PORT`).
+- `masquerade` gives traffic leaving `out` that interface's address (NAT).
+  `dnat` sends connections to `dport` on `in` to another machine (a port
+  forward); they pass `forward` without a rule of their own. Both are IPv4
+  only.
+- `input` and `forward` drop what no rule accepts; `output` uses
+  `OUTPUT_POLICY` (default `accept`). Replies to allowed connections,
+  loopback, ICMPv6, the WireGuard ports, and DHCP and DNS on an interface
+  with a `dhcp=` range always pass. With `IPV6=no` (the default) nothing is
+  routed over IPv6.
+
+```
+input accept in=eth1 service=ping,ssh,dns,dhcp,webui # the LAN reaches the firewall
+input accept in=mgmt service=ssh,webui                 # SSH and the web UI from mgmt
+input accept in=eth0 src=203.0.113.0/24 proto=tcp dport=22
+forward accept in=eth1 out=eth0                        # LAN to WAN
+forward accept in=eth2 out=eth1 dst=192.168.10.10 proto=tcp dport=443
+masquerade out=eth0
+dnat in=eth0 proto=tcp dport=8443 to=192.168.10.10:443
+```
+
+**Upgrading from interface roles.** Configs from before the rules file (with
+`role=` and `allow=` on interfaces, `NAT`, `WAN_PING` and `WEBUI_WAN` in
+`pxmxfw.conf`, and the `services` and `forwards` files) are converted on the
+next start, `pxmxfw apply` or visit to the web UI (or with `pxmxfw
+migrate`). The new rules let through exactly what the roles did, so SSH and
+the web UI stay reachable where they were. The old files are kept in
+`/etc/pxmxfw/backup-roles/`.
 
 ```sh
 pxmxfw apply      # validate, set addresses, load the rules, update dnsmasq
@@ -263,7 +318,7 @@ or git, write the files in `/etc/pxmxfw` and run `pxmxfw apply`. Extra
 hand-written nftables rules go in `/etc/nftables.d/*.nft`.
 
 No SSH server is installed; use `pct enter 200`, or `apk add openssh` and
-allow it on WAN in `services` if you need it.
+allow SSH on the interfaces you want under Firewall.
 
 ## Tests
 

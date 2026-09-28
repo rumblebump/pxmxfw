@@ -1,6 +1,7 @@
 #!/sbin/openrc-run
-# pxmxfw web UI (pxmxfw-webui, HTTPS). It listens on the LAN address only
-# (see WEBUI_PORT and WEBUI_WAN in /etc/pxmxfw/pxmxfw.conf).
+# pxmxfw web UI (pxmxfw-webui, HTTPS). It listens on the address of the
+# interface the firewall rules let reach it
+# (see WEBUI_PORT in /etc/pxmxfw/pxmxfw.conf and service=webui in rules).
 
 description="pxmxfw web UI"
 supervisor=supervise-daemon

@@ -20,7 +20,7 @@ nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
 nav button { border: 0; background: none; padding: 6px 10px; border-radius: 6px; color: var(--muted); }
 nav button.active { background: var(--bg); color: var(--text); font-weight: 600; }
 .dot { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--fail); color: #fff; font-size: 12px; }
-main { max-width: 960px; margin: 0 auto; padding: 16px; }
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
 section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px 16px 16px; overflow-x: auto; }
 h2 { font-size: 15px; margin: 20px 0 8px; }
 h3 { font-size: 12px; margin: 0 0 4px; color: var(--muted); font-weight: 500; text-transform: uppercase; }
@@ -75,3 +75,14 @@ td input[type=checkbox], .form input[type=checkbox] { width: auto; }
 .term { margin-top: 12px; height: 60vh; min-height: 300px; background: #000; border-radius: 6px; padding: 4px; }
 table.ifaces tr.detail > td { background: var(--bg); padding: 12px; }
 table.ifaces tr.detail h3 { margin: 14px 0 4px; font-size: 14px; }
+.subtabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.subtabs button { border: 1px solid var(--line); background: none; color: var(--muted); }
+.subtabs button.active { background: var(--bg); color: var(--text); font-weight: 600; }
+table.rules td { padding: 4px; border-bottom: 0; }
+table.rules td input, table.rules td select { min-width: 80px; width: 100%; }
+table.rules td select { min-width: 95px; }
+table.rules tr.desc td { padding-top: 0; border-bottom: 1px solid var(--line); }
+table.rules tr.desc .hint { margin: 0; font-size: 12px; }
+table.access td, table.access th { text-align: center; }
+table.access td:first-child, table.access th:first-child { text-align: left; }
+.nowrap { white-space: nowrap; }
