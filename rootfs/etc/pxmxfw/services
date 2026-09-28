@@ -1,4 +1,0 @@
-# Services on the firewall itself that are open from WAN.
-# Format: tcp|udp PORT[-PORT] [# comment]
-# Example:
-# tcp 22 # ssh

@@ -6,9 +6,10 @@
 #                      update dnsmasq (safe to run any number of times)
 #   check              check kernel modules and container settings
 #   status             show interfaces and service state
-#   detect             add newly found network interfaces (as role=off)
+#   detect             add newly found network interfaces (no rules allow them yet)
+#   migrate            convert a config with interface roles to firewall rules
 #   render nft|dnsmasq print the generated config without applying it
-#   validate KIND FILE check a config file (settings|interfaces|services|forwards|hosts|wireguard|packages)
+#   validate KIND FILE check a config file (settings|interfaces|rules|hosts|wireguard|packages)
 #   firstboot          one-time setup on the first container start
 #   wg-keypair         print a new WireGuard key pair (for a peer; not stored)
 #   pkg-list           extra packages from /etc/pxmxfw/packages and their versions
@@ -29,7 +30,9 @@ PXMXFW_LIB=${PXMXFW_LIB:-/usr/lib/pxmxfw}
 
 RULESET=$PXMXFW_ETC/ruleset.nft
 IFACES=$PXMXFW_ETC/interfaces
+RULES=$PXMXFW_ETC/rules
 NFT_MAIN=${PXMXFW_NFT_MAIN:-/etc/nftables.nft}
+NFT_D=${PXMXFW_NFT_D:-/etc/nftables.d}
 FIRSTBOOT_DONE=$PXMXFW_ETC/.firstboot-done
 WG_DIR=$PXMXFW_ETC/wg
 
@@ -68,13 +71,14 @@ set_addrs() {
 	esac
 }
 
-_a_iface() { # name role addr addr6 dhcp comment
+_a_iface() { # name addr addr6 dhcp comment ...
 	[ -e "$PXMXFW_SYSNET/$1" ] || return 0
-	[ "$2" = off ] && return 0
+	# bridge ports are brought up with their bridge and carry no address
+	case " $PORT_IFS " in *" $1 "*) return 0 ;; esac
 	ip link set dev "$1" up 2>/dev/null || true
-	[ "$3" = proxmox ] || set_addrs "$1" 4 "$3" || echo "pxmxfw: could not set $3 on $1" >&2
-	if [ "$IPV6" = yes ] && [ "$4" != proxmox ]; then
-		set_addrs "$1" 6 "$4" || echo "pxmxfw: could not set $4 on $1" >&2
+	[ "$2" = proxmox ] || set_addrs "$1" 4 "$2" || echo "pxmxfw: could not set $2 on $1" >&2
+	if [ "$IPV6" = yes ] && [ "$3" != proxmox ]; then
+		set_addrs "$1" 6 "$3" || echo "pxmxfw: could not set $3 on $1" >&2
 	fi
 }
 
@@ -233,10 +237,48 @@ apply_system() {
 	fi
 }
 
+# FIREWALL=manual: the rules are the admin's files in /etc/nftables.d. So
+# that switching over never leaves the firewall open, the first switch
+# writes the current rules there as a starting point (or brings back the
+# file of an earlier switch). Switching back to FIREWALL=rules parks that
+# file as firewall.nft.off, so it does not drop what the rules allow.
+MANUAL_HEAD='# Firewall rules written by hand (FIREWALL=manual'
+seed_manual() {
+	f=$NFT_D/firewall.nft
+	if [ "$FIREWALL" != manual ]; then
+		if [ -f "$f" ] && head -n 1 "$f" | grep -qF "$MANUAL_HEAD"; then
+			mv "$f" "$f.off"
+			echo "firewall: rules from $PXMXFW_ETC/rules; moved the hand-written $f to $f.off"
+		fi
+		return 0
+	fi
+	set +f
+	for _f in "$NFT_D"/*.nft; do
+		[ -e "$_f" ] && { set -f; return 0; }
+	done
+	set -f
+	if [ -f "$f.off" ]; then
+		mv "$f.off" "$f"
+		echo "firewall: manual; loading $f again"
+		return 0
+	fi
+	mkdir -p "$NFT_D"
+	{
+		echo "$MANUAL_HEAD in $PXMXFW_ETC/pxmxfw.conf)."
+		echo "# This started as a copy of the rules pxmxfw generated. Edit it, add more"
+		echo "# files here, then run: pxmxfw apply (it checks them before loading)."
+		render_nft rules | sed '1d; s/^table inet pxmxfw {/table inet firewall {/'
+	} > "$NFT_D/firewall.nft.new"
+	mv "$NFT_D/firewall.nft.new" "$NFT_D/firewall.nft"
+	echo "firewall: manual; wrote the current rules to $NFT_D/firewall.nft to start from"
+}
+
 cmd_apply() {
+	cmd_migrate
 	load
 	[ "${1:-}" = --boot ] || apply_system
 
+	seed_manual
 	tmp=$RULESET.new
 	render_nft > "$tmp"
 	# Check the candidate with the same wrapper nftables uses at boot
@@ -275,12 +317,12 @@ cmd_apply() {
 }
 
 # ---- interface detection ------------------------------------------------------
-# New interfaces (a NIC added in Proxmox, later a WireGuard tunnel) are added
-# with role=off, so nothing reaches or leaves through them until they are
-# given a role in the web UI.
+# New interfaces (a NIC added in Proxmox) are added to the interfaces file.
+# No rule names them yet, so the firewall passes nothing from them until
+# rules are added in the web UI.
 
-detect_line() { # IFACE ROLE: a new interfaces line, noting what Proxmox set
-	line="$1 role=$2"
+detect_line() { # IFACE: a new interfaces line, noting what Proxmox set
+	line=$1
 	case $(proxmox_method "$1") in
 		static|dhcp) ;;
 		*) line="$line addr=none" ;;
@@ -298,8 +340,8 @@ cmd_detect() {
 	for i in $(present_ifaces); do
 		case " $(echo $known) " in *" $i "*) continue ;; esac
 		ours "$i" && continue  # a VLAN or bridge removed from the file
-		detect_line "$i" off >> "$IFACES"
-		echo "found new interface $i (role=off)"
+		detect_line "$i" >> "$IFACES"
+		echo "found new interface $i (no rules for it yet)"
 	done
 }
 
@@ -307,50 +349,180 @@ cmd_detect() {
 # Proxmox writes /etc/network/interfaces, /etc/hostname, /etc/hosts and
 # /etc/resolv.conf on every container start, so this never touches them. It
 # only derives pxmxfw's own defaults from what Proxmox configured: eth0 (net0)
-# is the WAN, eth1 (net1) the LAN, any other NIC starts switched off.
+# is the WAN, eth1 (net1) the LAN. Other NICs get no rules, so nothing
+# passes through them until rules are added.
 
 cmd_firstboot() {
 	[ -e "$FIRSTBOOT_DONE" ] && { echo "first boot setup already done"; return 0; }
 	settings_load || die "invalid settings in $PXMXFW_ETC/pxmxfw.conf"
 
+	lan=
 	{
 		echo "# Network interfaces. eth0 (net0 in Proxmox) is the WAN."
-		echo "# IFACE role=wan|lan|isolated|off [addr=proxmox|none|IP/PREFIX] [addr6=...] [dhcp=START-END] [allow=...] [type=vlan|bridge ...]"
-		wan=
+		echo "# IFACE [addr=proxmox|none|IP/PREFIX] [addr6=...] [dhcp=START-END] [type=vlan|bridge ...]"
+		echo "# What may pass is set in the rules file."
+		echo "eth0"
 		for i in $(present_ifaces); do
-			if [ -z "$wan" ] && [ "$i" = eth0 ]; then
-				wan=$i
-				echo "eth0 role=wan"
-			elif [ "$i" = eth1 ]; then
-				line=$(detect_line eth1 lan)
+			[ "$i" != eth0 ] || continue
+			line=$(detect_line "$i")
+			if [ "$i" = eth1 ]; then
+				lan=eth1
 				if addr=$(proxmox_address eth1) && range=$(dhcp_range_for "$addr"); then
 					line="$line dhcp=$range"
 					echo "pxmxfw: LAN eth1 is $addr, DHCP range $range (dnsmasq stays off until enabled)" >&2
 				fi
-				echo "$line"
-			else
-				detect_line "$i" off
 			fi
+			echo "$line"
 		done
-		[ -n "$wan" ] || echo "eth0 role=wan"
 	} > "$IFACES.new"
 	mv "$IFACES.new" "$IFACES"
 
-	if ! grep -q 'role=lan' "$IFACES"; then
-		# Single NIC: keep the web UI reachable on WAN to finish the setup;
-		# it asks for the root password.
-		echo "pxmxfw: no LAN interface yet, web UI allowed on WAN" >&2
-		WEBUI_WAN=yes
-		settings_write > "$PXMXFW_ETC/pxmxfw.conf.new"
-		mv "$PXMXFW_ETC/pxmxfw.conf.new" "$PXMXFW_ETC/pxmxfw.conf"
-	fi
+	WAN=eth0
+	settings_write > "$PXMXFW_ETC/pxmxfw.conf.new"
+	mv "$PXMXFW_ETC/pxmxfw.conf.new" "$PXMXFW_ETC/pxmxfw.conf"
+
+	{
+		rules_header
+		echo "input accept in=eth0 service=ping # ping on WAN"
+		if [ -n "$lan" ]; then
+			echo "input accept in=$lan service=$SERVICES # the LAN reaches the firewall"
+			echo "forward accept in=$lan out=eth0 # LAN to WAN"
+		else
+			# Single NIC: keep the web UI reachable on WAN to finish the
+			# setup; it asks for the root password.
+			echo "pxmxfw: no LAN interface yet, web UI allowed on WAN" >&2
+			echo "input accept in=eth0 service=webui # setup from WAN, remove when the LAN works"
+		fi
+		echo "masquerade out=eth0 # NAT out of WAN"
+	} > "$RULES.new"
+	mv "$RULES.new" "$RULES"
 	touch "$FIRSTBOOT_DONE"
+}
+
+rules_header() {
+	cat <<-'EOF'
+	# Firewall rules, applied in this order. Edit in the web UI or here, then
+	# run: pxmxfw apply. Format (see /usr/lib/pxmxfw/lib.sh):
+	#   input|output|forward accept|drop|reject [in=IF] [out=IF] [src=NET] [dst=NET]
+	#       [proto=tcp|udp|tcp,udp|icmp] [sport=PORT] [dport=PORT] [service=ping,ssh,dns,dhcp,webui]
+	#   masquerade out=IF [src=NET]
+	#   dnat in=IF proto=tcp|udp dport=PORT to=IP[:PORT] [src=NET]
+	EOF
+}
+
+# ---- migration from interface roles -------------------------------------------
+# Before the rules file, each interface had a role (wan, lan, isolated, off)
+# and an allow= list, and pxmxfw.conf, services and forwards held the rest.
+# This writes rules that let through exactly what those did, removes role=
+# and allow=, and keeps the old files in $PXMXFW_ETC/backup-roles.
+
+legacy_config() {
+	awk '{ sub(/#.*/, "") } / (role|allow)=/ { f = 1 } END { exit !f }' "$IFACES" 2>/dev/null && return 0
+	grep -Eq '^[[:space:]]*(NAT|WAN_PING|WEBUI_WAN)=' "$PXMXFW_ETC/pxmxfw.conf" 2>/dev/null && return 0
+	[ -e "$PXMXFW_ETC/services" ] || [ -e "$PXMXFW_ETC/forwards" ]
+}
+
+legacy_setting() { # KEY DEFAULT
+	v=$(sed -n "s/^[[:space:]]*$1=[\"]*\([a-z]*\).*/\1/p" "$PXMXFW_ETC/pxmxfw.conf" 2>/dev/null | tail -n 1)
+	echo "${v:-$2}"
+}
+
+# legacy_list FILE: lines without comments and blanks, "fields|comment"
+legacy_list() {
+	[ -r "$1" ] || return 0
+	while IFS= read -r line || [ -n "$line" ]; do
+		c=
+		case $line in *'#'*) c=$(_strip "${line#*#}") ;; esac
+		line=$(_strip "$line")
+		[ -n "$line" ] || continue
+		is_comment "$c" || c=
+		echo "$line|$c"
+	done < "$1"
+}
+
+cmd_migrate() {
+	legacy_config || return 0
+	bak=$PXMXFW_ETC/backup-roles
+	mkdir -p "$bak"
+	for f in pxmxfw.conf interfaces services forwards rules; do
+		[ ! -e "$PXMXFW_ETC/$f" ] || cp -p "$PXMXFW_ETC/$f" "$bak/$f"
+	done
+	nat=$(legacy_setting NAT yes)
+	ping=$(legacy_setting WAN_PING yes)
+	uiwan=$(legacy_setting WEBUI_WAN no)
+
+	# interfaces without role= and allow=; collect what the roles allowed
+	wan='' lans='' inside='' allows=''
+	legacy_list "$IFACES" > "$IFACES.old.$$"
+	{
+		echo "# Network interfaces. What may pass is set in the rules file."
+		while IFS='|' read -r fields c; do
+			# shellcheck disable=SC2086
+			set -- $fields
+			name=$1; shift
+			role='' allow=- out=$name
+			for kv; do
+				case $kv in
+					role=*) role=${kv#role=} ;;
+					allow=none) allow='' ;;
+					allow=*) allow=${kv#allow=} ;;
+					*) out="$out $kv" ;;
+				esac
+			done
+			case $role in
+				wan) [ -n "$wan" ] || wan=$name ;;
+				lan) lans="$lans,$name"; inside="$inside,$name" ;;
+				isolated) inside="$inside,$name" ;;
+			esac
+			case $role in lan|isolated)
+				[ "$allow" != - ] || allow=$SERVICES
+				[ -z "$allow" ] || allows="$allows $name:$allow"
+			esac
+			echo "$out${c:+ # $c}"
+		done < "$IFACES.old.$$"
+	} > "$IFACES.new"
+	rm -f "$IFACES.old.$$"
+	wan=${wan:-$(legacy_setting WAN eth0)}
+	lans=${lans#,} inside=${inside#,}
+
+	{
+		rules_header
+		if [ -e "$RULES" ]; then grep -v '^[[:space:]]*#' "$RULES" || true; fi
+		[ "$ping" = no ] || echo "input accept in=$wan service=ping # ping on WAN"
+		[ "$uiwan" = no ] || echo "input accept in=$wan service=webui # web UI from WAN"
+		legacy_list "$PXMXFW_ETC/services" | while IFS='|' read -r fields c; do
+			# shellcheck disable=SC2086
+			set -- $fields
+			echo "input accept in=$wan proto=$1 dport=$2${c:+ # $c}"
+		done
+		for a in $allows; do
+			echo "input accept in=${a%%:*} service=${a#*:} # what ${a%%:*} may reach"
+		done
+		[ -z "$lans" ] || echo "forward accept in=$lans out=$lans # lan to lan"
+		[ -z "$inside" ] || echo "forward accept in=$inside out=$wan # inside to WAN"
+		[ "$nat" = no ] || echo "masquerade out=$wan # NAT out of WAN"
+		legacy_list "$PXMXFW_ETC/forwards" | while IFS='|' read -r fields c; do
+			# shellcheck disable=SC2086
+			set -- $fields
+			echo "dnat in=$wan proto=$1 dport=$2 to=$3:$4${c:+ # $c}"
+		done
+	} > "$RULES.new"
+
+	grep -Ev '^[[:space:]]*(NAT|WAN_PING|WEBUI_WAN|WAN)=' "$PXMXFW_ETC/pxmxfw.conf" > "$PXMXFW_ETC/pxmxfw.conf.new" 2>/dev/null || true
+	echo "WAN=$wan" >> "$PXMXFW_ETC/pxmxfw.conf.new"
+
+	mv "$IFACES.new" "$IFACES"
+	mv "$RULES.new" "$RULES"
+	mv "$PXMXFW_ETC/pxmxfw.conf.new" "$PXMXFW_ETC/pxmxfw.conf"
+	rm -f "$PXMXFW_ETC/services" "$PXMXFW_ETC/forwards"
+	echo "pxmxfw: converted interface roles to firewall rules in $RULES (old files in $bak)" >&2
 }
 
 # Boot: first boot setup, pick up new NICs, set addresses, write the ruleset
 # the nftables service loads right after.
 cmd_boot() {
 	cmd_firstboot
+	cmd_migrate
 	cmd_detect
 	load
 	apply_system
@@ -384,24 +556,26 @@ _probe() {
 	rm -f "$f"
 }
 
-_c_iface() { # name role addr addr6 dhcp comment
-	[ "$2" = off ] && return 0
+_c_iface() { # name addr addr6 dhcp comment type ...
+	case " $PORT_IFS " in *" $1 "*) return 0 ;; esac
+	t="Interface $1"
+	[ "$1" != "$WAN" ] || t="$t (WAN)"
 	if [ -e "$PXMXFW_SYSNET/$1" ]; then
 		a=$(iface_ipv4 "$1")
-		if [ -z "$a" ] && [ "$2" != wan ]; then
-			_check warn "if_$1" "Interface $1 ($2)" "no IPv4 address" \
+		if [ -z "$a" ] && [ "$1" != "$WAN" ] && [ "$2" != none ]; then
+			_check warn "if_$1" "$t" "no IPv4 address" \
 				"Give it an address in the web UI (Interfaces) or in Proxmox."
 		else
-			_check ok "if_$1" "Interface $1 ($2)" "present${a:+, $a}" ""
+			_check ok "if_$1" "$t" "present${a:+, $a}" ""
 		fi
 	elif case " $WG_TUNNELS " in *" $1 "*) true ;; *) false ;; esac; then
-		_check fail "if_$1" "Tunnel $1 ($2)" "not created" "See the WireGuard check above, then click Apply."
-	elif [ -n "${7:-}" ]; then
-		_check fail "if_$1" "Interface $1 ($2)" "not created" "See the ${7} check above, then click Apply."
+		_check fail "if_$1" "Tunnel $1" "not created" "See the WireGuard check above, then click Apply."
+	elif [ -n "${6:-}" ]; then
+		_check fail "if_$1" "$t" "not created" "See the ${6} check above, then click Apply."
 	else
 		n=${1#eth}
 		case $n in *[!0-9]*|'') n=N ;; esac
-		_check fail "if_$1" "Interface $1 ($2)" "missing" \
+		_check fail "if_$1" "$t" "missing" \
 			"Add it in Proxmox: pct set CTID -net$n name=$1,bridge=vmbrX"
 	fi
 }
@@ -468,10 +642,17 @@ cmd_check() {
 	fi
 
 	ifaces_each "$IFACES" _c_iface 2>/dev/null || true
-	[ -n "$IN_IFS" ] || _check warn inside "LAN side" "no interface with role lan or isolated" \
-		"Add a second network device in Proxmox (pct set CTID -net1 name=eth1,bridge=vmbr1,ip=192.168.10.1/24), then give it a role in the web UI."
+	[ "$IF_NAMES" != "$WAN" ] || _check warn inside "LAN side" "no interface besides the WAN" \
+		"Add a second network device in Proxmox (pct set CTID -net1 name=eth1,bridge=vmbr1,ip=192.168.10.1/24), then add rules for it in the web UI."
 
-	if nft list table inet pxmxfw >/dev/null 2>&1; then
+	if [ "$FIREWALL" = manual ]; then
+		if [ -n "$(nft list ruleset 2>/dev/null | grep 'hook input')" ]; then
+			_check ok firewall "Firewall rules" "written by hand in /etc/nftables.d (FIREWALL=manual)" ""
+		else
+			_check fail firewall "Firewall rules" "FIREWALL=manual, but no loaded rules filter input" \
+				"Put your rules in /etc/nftables.d/*.nft and run: pxmxfw apply, or switch back to the rules from the web UI."
+		fi
+	elif nft list table inet pxmxfw >/dev/null 2>&1; then
 		_check ok firewall "Firewall rules" "loaded" ""
 	else
 		_check fail firewall "Firewall rules" "not loaded" "Fix the failed checks above, then click Apply (or run: pxmxfw apply)."
@@ -513,10 +694,14 @@ cmd_check_human() {
 
 # ---- status ---------------------------------------------------------------
 
-_s_iface() { # name role addr addr6 dhcp comment
+_s_iface() { # name addr addr6 dhcp comment type ...
 	if [ -e "$PXMXFW_SYSNET/$1" ]; then st=present; else st=missing; fi
 	pm=$(proxmox_method "$1"); pm6=$(proxmox_method "$1" inet6)
-	echo "iface=$1 $2 $st ${pm:--} ${pm6:--}"
+	kind=${6:-nic}
+	case " $WG_TUNNELS " in *" $1 "*) kind=wireguard ;; esac
+	case " $PORT_IFS " in *" $1 "*) kind=port ;; esac
+	[ "$1" != "$WAN" ] || kind=wan
+	echo "iface=$1 $kind $st ${pm:--} ${pm6:--}"
 }
 
 cmd_status() {
@@ -527,7 +712,8 @@ cmd_status() {
 	echo "uptime=$(awk '{ printf "%d\n", $1 }' /proc/uptime)"
 	echo "wan_if=$WAN_IF"
 	echo "ipv6=$IPV6"
-	if nft list table inet pxmxfw >/dev/null 2>&1; then echo firewall=active; else echo firewall=inactive; fi
+	if [ "$FIREWALL" = manual ]; then echo firewall=manual
+	elif nft list table inet pxmxfw >/dev/null 2>&1; then echo firewall=active; else echo firewall=inactive; fi
 	if pidof dnsmasq >/dev/null 2>&1; then echo dnsmasq=running
 	elif [ "$DNSMASQ" = yes ]; then echo dnsmasq=stopped
 	else echo dnsmasq=disabled; fi
@@ -537,7 +723,7 @@ cmd_status() {
 	for m in wireguard:wireguard vlan:8021q bridge:bridge; do
 		if module_loaded "${m#*:}"; then echo "feature=${m%%:*} yes"; else echo "feature=${m%%:*} no"; fi
 	done
-	# iface=NAME ROLE present|missing PROXMOX_V4 PROXMOX_V6
+	# iface=NAME wan|nic|vlan|bridge|port|wireguard present|missing PROXMOX_V4 PROXMOX_V6
 	ifaces_each "$IFACES" _s_iface 2>/dev/null || true
 	# wg=NAME PUBLICKEY PORT present|missing, then wgpeer=NAME KEY ENDPOINT HANDSHAKE RX TX
 	set -- $WG_PORTS
@@ -551,20 +737,23 @@ cmd_status() {
 	ip -o addr show 2>/dev/null | awk '$2 != "lo" && $4 !~ /^fe80:/ { print "addr=" $2 " " $4 }'
 }
 
-# Listen address for the web UI: the first address of an interface that
-# allows it, or all addresses
-# when the UI is allowed on WAN (the firewall still limits who reaches it).
+# Listen address for the web UI: the address of the one interface a rule
+# lets reach it, or all addresses when rules let more than one interface (or
+# any) reach it; the firewall still limits who does.
 cmd_webui_listen() {
 	config_load 2>/dev/null || true
-	if [ "$WEBUI_WAN" = yes ]; then
+	# hand-written rules decide who reaches it
+	[ "$FIREWALL" != manual ] || { echo "$WEBUI_PORT"; return; }
+	ifs=$(echo "$WEBUI_IFS" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ')
+	set -- $ifs
+	if [ $# -eq 1 ] && [ "$1" != '*' ]; then
+		a=$(iface_ipv4 "$1")
+		[ -z "$a" ] || { echo "$a:$WEBUI_PORT"; return; }
+	elif [ $# -gt 1 ] || [ "${1:-}" = '*' ]; then
 		echo "$WEBUI_PORT"
 		return
 	fi
-	for i in $ALLOW_WEBUI_IFS; do
-		a=$(iface_ipv4 "$i")
-		[ -z "$a" ] || { echo "$a:$WEBUI_PORT"; return; }
-	done
-	echo "pxmxfw: no LAN address, web UI on localhost only" >&2
+	echo "pxmxfw: no rule lets an interface with an address reach the web UI, so it is on localhost only" >&2
 	echo "127.0.0.1:$WEBUI_PORT"
 }
 
@@ -641,6 +830,7 @@ case ${1:-help} in
 	check) if [ "${2:-}" = --tsv ]; then cmd_check; else cmd_check_human; fi ;;
 	status) cmd_status ;;
 	detect) cmd_detect ;;
+	migrate) cmd_migrate ;;
 	render) cmd_render "${2:-nft}" ;;
 	validate) [ $# -eq 3 ] || die "usage: pxmxfw validate KIND FILE"; validate "$2" "$3" ;;
 	firstboot) cmd_firstboot ;;
@@ -652,6 +842,6 @@ case ${1:-help} in
 	pkg-del) shift; cmd_pkg_del "$@" ;;
 	pkg-sync) cmd_pkg_sync ;;
 	pkg-upgrade) cmd_pkg_upgrade ;;
-	help|-h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' ;;
+	help|-h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//' ;;
 	*) die "unknown command: $1 (try: pxmxfw help)" ;;
 esac

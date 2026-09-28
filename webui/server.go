@@ -585,7 +585,7 @@ func (s *server) fileFor(name string) (string, bool) {
 	switch name {
 	case "settings":
 		return filepath.Join(s.etc, "pxmxfw.conf"), true
-	case "interfaces", "services", "forwards", "hosts", "wireguard", "packages":
+	case "interfaces", "rules", "hosts", "wireguard", "packages":
 		return filepath.Join(s.etc, name), true
 	}
 	return "", false
@@ -612,11 +612,12 @@ func (s *server) getFile(w http.ResponseWriter, name string) {
 		text(w, http.StatusBadRequest, "unknown file\n")
 		return
 	}
+	s.mu.Lock()
+	s.command("migrate") // a config from before the rules file
 	if name == "interfaces" {
-		s.mu.Lock()
 		s.command("detect") // pick up NICs added since boot
-		s.mu.Unlock()
 	}
+	s.mu.Unlock()
 	b, _ := os.ReadFile(f)
 	text(w, http.StatusOK, string(b))
 }

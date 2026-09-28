@@ -157,11 +157,12 @@ jobs:
           call -d '{"user":"root","password":"ci-test-pw"}' "$api?action=login"
           call "$api?action=file&name=settings" | grep -q '^IPV6=no'
           # changes need a fresh confirmation, and are validated by pxmxfw
-          test "$(code --data-binary 'tcp 2222' "$api?action=save&name=services")" = 403
+          test "$(code --data-binary 'input accept in=eth1 proto=tcp dport=2222' "$api?action=save&name=rules")" = 403
           call -d '{"password":"ci-test-pw"}' "$api?action=stepup"
-          test "$(code --data-binary 'tcp 22; reboot' "$api?action=save&name=services")" = 422
-          call --data-binary 'tcp 2222 # test' "$api?action=save&name=services"
-          grep -qx 'tcp 2222 # test' /tmp/fw/etc/pxmxfw/services
+          test "$(code --data-binary 'input accept in=eth1;reboot' "$api?action=save&name=rules")" = 422
+          test "$(code --data-binary 'input accept in=eth9' "$api?action=save&name=rules")" = 422
+          call --data-binary 'input accept in=eth1 proto=tcp dport=2222 # test' "$api?action=save&name=rules"
+          grep -qx 'input accept in=eth1 proto=tcp dport=2222 # test' /tmp/fw/etc/pxmxfw/rules
           call -o /dev/null https://127.0.0.1:8443/alpine.min.js
           # web terminal: xterm.js is served and root's login shell exists
           for f in xterm.js xterm-fit.js xterm.css; do call -o /dev/null "https://127.0.0.1:8443/$f"; done
