@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
 		-r) MINIROOTFS=$2; shift 2 ;;
 		-t) TARGET=$2; shift 2 ;;
 		-f) FROM=$2; shift 2 ;;
-		-h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) die "unknown option: $1" ;;
 	esac
 done
