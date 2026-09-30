@@ -1030,7 +1030,7 @@ document.addEventListener('alpine:init', () => {
 		},
 		vm() { return this.status.target === 'vm'; },
 		hintText(c) {
-			if (c.hint.startsWith('modules:')) return `${this.vm() ? 'In a terminal here' : 'On the Proxmox host'}: modprobe -a ${c.hint.slice(8)} (see below to keep it loaded)`;
+			if (c.hint.startsWith('modules:')) return `${this.vm() ? 'In a terminal here' : this.status.target === 'oci' ? 'On the host' : 'On the Proxmox host'}: modprobe -a ${c.hint.slice(8)} (see below to keep it loaded)`;
 			return this.ctid(c.hint);
 		},
 		ctid(text) { return text.replaceAll('CTID', this.ctidValue.trim() || 'CTID'); },

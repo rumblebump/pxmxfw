@@ -30,6 +30,11 @@ versions that create containers from OCI images:
 `ghcr.io/rumblebump/pxmxfw:latest`, `:edge`, or a version such as
 `:0.1.0-alpine3.22.6`.
 
+For podman and docker (tests, or a small local setup) there is a separate
+image, `ghcr.io/rumblebump/pxmxfw-oci` with the same tags, and the same image
+as a file, `pxmxfw_amd64.oci.tar`, in each release (see
+[Run it with podman or docker](#run-it-with-podman-or-docker)).
+
 ## Releases and CI
 
 The *CI* workflow runs in stages: **test** (Go, shellcheck, rule tests),
@@ -38,8 +43,11 @@ inside the built template), **security** (a [Trivy](https://trivy.dev) scan
 that lists known CVEs with a fix in the run summary) and **build-vm** (the
 qcow2 VM image, made from that template), then **test-vm** (boots the image
 in QEMU and checks DHCP, the firewall, the web UI and ACPI shutdown over the
-serial console), and last **release** (GitHub releases and ghcr.io images;
-not for pull requests).
+serial console), **build-oci** (the podman/docker image, from that template)
+and **test-oci** (runs it with podman and with docker on a WAN and a LAN
+network: boot, firewall, web UI, a LAN client routed out of the WAN, stop),
+and last **release** (GitHub releases and ghcr.io images; not for pull
+requests).
 
 Releases are tagged `v<pxmxfw version>+alpine<Alpine version>`, e.g.
 `v0.1.0+alpine3.22.6`. Edge is rebuilt after every merge and every Monday with
@@ -60,12 +68,13 @@ With [podman](https://podman.io) on any x86_64 Linux, no root needed:
 ```sh
 ./build.sh --podman            # LXC template (.tar.gz)
 ./build.sh --podman -t vm      # VM disk image (.qcow2)
-./build.sh --podman -t all     # both, from one root filesystem
+./build.sh --podman -t oci     # podman/docker image (.oci.tar)
+./build.sh --podman -t all     # all three, from one root filesystem
 ```
 
-The repository is laid out so both come from the same files: `rootfs/` is
-what the container and the VM share, `targets/lxc/rootfs/` and
-`targets/vm/rootfs/` hold the few files that differ (inittab, motd, and for
+The repository is laid out so all of them come from the same files: `rootfs/`
+is what they share, `targets/lxc/rootfs/`, `targets/vm/rootfs/` and
+`targets/oci/rootfs/` hold the few files that differ (inittab, motd, and for
 the VM fstab, network config and the initramfs drivers), and
 `targets/vm/mkimage.sh` adds the kernel and bootloader and writes the disk.
 
@@ -190,6 +199,70 @@ qemu-system-x86_64 -enable-kvm -m 256 -nographic -snapshot \
 
 `-snapshot` leaves the image unchanged; drop it to keep your changes. Quit
 with `Ctrl+A` then `X`.
+
+## Run it with podman or docker
+
+The same firewall runs as a podman or docker container, for tests or a small
+local setup. It boots OpenRC like the LXC does, so it needs a few more
+rights than an app container:
+
+- `--cap-add NET_ADMIN` for nftables and addresses, `--cap-add NET_RAW` for
+  ping and DHCP.
+- `--sysctl net.ipv4.ip_forward=1`, since `/proc/sys` is read-only inside.
+- nftables in the host's kernel (it shares the host kernel, like the LXC);
+  `pxmxfw check` names any module to load on the host.
+
+`eth0` is the WAN and `eth1` the LAN, so give the container two networks
+and name the interfaces. With podman:
+
+```sh
+podman network create --subnet 10.10.0.0/24 fw-wan
+podman network create --subnet 192.168.10.0/24 fw-lan
+podman run -d --name pxmxfw --hostname pxmxfw \
+  --cap-add NET_ADMIN --cap-add NET_RAW --sysctl net.ipv4.ip_forward=1 \
+  --network fw-wan:interface_name=eth0 \
+  --network fw-lan:interface_name=eth1,ip=192.168.10.2 \
+  ghcr.io/rumblebump/pxmxfw-oci:latest
+podman exec -it pxmxfw passwd    # the web UI logs in as root
+```
+
+With docker (28 or newer, for the interface names):
+
+```sh
+docker network create --subnet 10.10.0.0/24 fw-wan
+docker network create --subnet 192.168.10.0/24 fw-lan
+docker run -d --name pxmxfw --hostname pxmxfw \
+  --cap-add NET_ADMIN --cap-add NET_RAW --sysctl net.ipv4.ip_forward=1 \
+  --network name=fw-wan,driver-opt=com.docker.network.endpoint.ifname=eth0,gw-priority=1 \
+  --network name=fw-lan,driver-opt=com.docker.network.endpoint.ifname=eth1,ip=192.168.10.2 \
+  ghcr.io/rumblebump/pxmxfw-oci:latest
+docker exec -it pxmxfw passwd
+```
+
+The web UI is then at `https://192.168.10.2:8443` (the host is `.1` on the
+LAN network). To only try it out, one network is enough: with no LAN the
+first start allows the web UI on the WAN, so `-p 8443:8443` reaches it.
+
+Offline, or a build of your own: `podman load -i pxmxfw_amd64.oci.tar` (or
+`docker load -i`, or the `out/*.oci.tar` from `./build.sh --podman -t oci`)
+loads it as `pxmxfw:latest`; use that name instead.
+
+What differs from the LXC:
+
+- podman or docker sets the addresses (use `ip=` to fix them). On every
+  start pxmxfw writes them to `/etc/network/interfaces`, as Proxmox would,
+  so they count as "from Proxmox" and the first start picks the LAN's DHCP
+  range from `eth1`'s subnet.
+- Other containers on the LAN network use the host as their gateway. Point
+  them at the firewall (`ip route replace default via 192.168.10.2`, needs
+  `NET_ADMIN`), or for real machines use a macvlan or ipvlan network on a
+  host NIC, where the firewall can also hand out DHCP.
+- The settings live in the container. Keep them when you re-create it with
+  `-v pxmxfw-etc:/etc/pxmxfw -v pxmxfw-state:/var/lib/pxmxfw` (the root
+  password is not kept: set it again with `passwd`).
+- `podman stop` / `docker stop` shut OpenRC down cleanly. There is no
+  console; use `podman exec -it pxmxfw sh`.
+- amd64 only.
 
 ## First start
 

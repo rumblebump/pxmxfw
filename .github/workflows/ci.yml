@@ -1,6 +1,7 @@
 name: CI
 
-# Stages: test -> build -> test-template + security + build-vm -> test-vm -> release
+# Stages: test -> build -> test-template + security + build-vm + build-oci
+#         -> test-vm + test-oci -> release
 on:
   push:
     branches: [main]
@@ -57,7 +58,7 @@ jobs:
         run: |
           shellcheck -s sh -S warning -e SC2034 \
             rootfs/usr/sbin/pxmxfw rootfs/usr/lib/pxmxfw/lib.sh \
-            rootfs/etc/init.d/pxmxfw* tests/run.sh build.sh targets/vm/mkimage.sh
+            rootfs/etc/init.d/pxmxfw* tests/run.sh tests/oci-run.sh build.sh targets/vm/mkimage.sh
 
       # As root, so generated rulesets are loaded into a throwaway netns
       - name: Tests (dash)
@@ -232,6 +233,52 @@ jobs:
         if: always()
         run: cat vm-serial.log || true
 
+  # The podman/docker image, made from the template like the VM image.
+  build-oci:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pxmxfw-template
+          path: template
+
+      - name: Build the container image (podman)
+        run: |
+          ./build.sh --podman -t oci -f template/*.tar.gz -o out
+          ls -l out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pxmxfw-oci
+          path: out/*.oci.tar
+          if-no-files-found: error
+
+  # Runs the image with podman and with docker, with a WAN and a LAN network:
+  # boot, the firewall, the web UI on the LAN, a LAN client routed and NATed
+  # out of the WAN, and stop.
+  test-oci:
+    runs-on: ubuntu-latest
+    needs: build-oci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pxmxfw-oci
+          path: out
+
+      - name: Load the nftables modules on the host
+        run: sudo modprobe -a nf_tables nft_chain_nat nft_ct nft_masq nft_reject_inet nft_fib_inet || true
+
+      - name: Run with podman
+        run: sudo tests/oci-run.sh podman out/*.oci.tar
+
+      - name: Run with docker
+        run: sudo tests/oci-run.sh docker out/*.oci.tar
+
   # Report only: known CVEs with a fix in Alpine or Go. Rebuilding picks up
   # fixed Alpine packages; the weekly run does that for edge.
   security:
@@ -265,9 +312,11 @@ jobs:
   # or pulls the same root filesystem as an OCI image:
   #   ghcr.io/rumblebump/pxmxfw:latest, :edge, :0.1.0-alpine3.22.6
   # and the VM disk the same way: .../download/pxmxfw_amd64.qcow2
+  # The podman/docker image is ghcr.io/rumblebump/pxmxfw-oci (same tags) and
+  # .../download/pxmxfw_amd64.oci.tar (for podman load / docker load).
   release:
     runs-on: ubuntu-latest
-    needs: [build, test-template, security, test-vm]
+    needs: [build, test-template, security, test-vm, test-oci]
     if: >-
       github.event_name != 'pull_request' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
@@ -286,6 +335,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: pxmxfw-vm
+          path: out
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pxmxfw-oci
           path: out
 
       - name: Pick what to publish
@@ -318,6 +372,7 @@ jobs:
           # Fixed name so the download URLs above never change
           cp alpine-*-pxmxfw-*_amd64.tar.gz pxmxfw_amd64.tar.gz
           cp alpine-*-pxmxfw-*_amd64.qcow2 pxmxfw_amd64.qcow2
+          cp alpine-*-pxmxfw-*_amd64.oci.tar pxmxfw_amd64.oci.tar
 
       # Every merge to main and the weekly run replace the "edge" prerelease
       - name: GitHub release (edge)
@@ -326,9 +381,9 @@ jobs:
           ALPINE: ${{ steps.what.outputs.alpine }}
         run: |
           cd out
-          sha256sum pxmxfw_amd64.tar.gz pxmxfw_amd64.qcow2 > SHA256SUMS
+          sha256sum pxmxfw_amd64.tar.gz pxmxfw_amd64.qcow2 pxmxfw_amd64.oci.tar > SHA256SUMS
           gh release delete edge --cleanup-tag --yes 2>/dev/null || true
-          gh release create edge pxmxfw_amd64.tar.gz pxmxfw_amd64.qcow2 SHA256SUMS --prerelease --latest=false \
+          gh release create edge pxmxfw_amd64.tar.gz pxmxfw_amd64.qcow2 pxmxfw_amd64.oci.tar SHA256SUMS --prerelease --latest=false \
             --target "$GITHUB_SHA" --title "edge (latest main)" \
             --notes "Built from ${GITHUB_SHA::7} on main with Alpine $ALPINE. Not a release; use a v* release for production."
 
@@ -339,8 +394,8 @@ jobs:
           ALPINE: ${{ steps.what.outputs.alpine }}
         run: |
           cd out
-          sha256sum *.tar.gz *.qcow2 > SHA256SUMS
-          gh release create "$TAG" *.tar.gz *.qcow2 SHA256SUMS --target "$GITHUB_SHA" --title "$TAG" \
+          sha256sum *.tar.gz *.qcow2 *.oci.tar > SHA256SUMS
+          gh release create "$TAG" *.tar.gz *.qcow2 *.oci.tar SHA256SUMS --target "$GITHUB_SHA" --title "$TAG" \
             --notes "Built on Alpine $ALPINE." --generate-notes
           echo "Released $TAG" >> "$GITHUB_STEP_SUMMARY"
 
@@ -362,8 +417,12 @@ jobs:
             --change "LABEL org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
             --change "LABEL org.opencontainers.image.description=pxmxfw firewall for Proxmox LXC" \
             out/pxmxfw_amd64.tar.gz "$image:build"
+          # the podman/docker image (build.sh -t oci) loads as pxmxfw:latest
+          sudo podman load -i out/pxmxfw_amd64.oci.tar
           for t in $tags; do
             sudo podman tag "$image:build" "$image:$t"
             sudo podman push "$image:$t"
-            echo "Pushed $image:$t" >> "$GITHUB_STEP_SUMMARY"
+            sudo podman tag localhost/pxmxfw:latest "$image-oci:$t"
+            sudo podman push "$image-oci:$t"
+            echo "Pushed $image:$t and $image-oci:$t" >> "$GITHUB_STEP_SUMMARY"
           done

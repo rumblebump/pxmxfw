@@ -1,5 +1,6 @@
 #!/bin/sh
-# Build pxmxfw: the Proxmox LXC template and/or the VM disk image.
+# Build pxmxfw: the Proxmox LXC template, the VM disk image and/or the
+# container image for podman and docker.
 #
 # Downloads the Alpine minirootfs, installs OpenRC, nftables and dnsmasq,
 # builds the web UI server (Go, in webui/) and applies the files under
@@ -7,13 +8,15 @@
 #   lxc  adds targets/lxc/rootfs and packs a template tarball for `pct create`
 #   vm   adds targets/vm/rootfs, a kernel and a bootloader and writes a qcow2
 #        disk for `qm disk import` (targets/vm/mkimage.sh)
+#   oci  adds targets/oci/rootfs and writes an OCI image archive for
+#        `podman load` / `docker load` (image name pxmxfw:latest)
 # Run it with --podman on any x86_64 Linux (no root needed), or as root on
 # an x86_64 host (a Proxmox node works; the VM image needs an Alpine host).
 #
-# Usage: ./build.sh [--podman] [-t lxc|vm|all] [-f TEMPLATE] [-v ALPINE_VERSION] [-m MIRROR] [-o OUTDIR] [-r MINIROOTFS]
+# Usage: ./build.sh [--podman] [-t lxc|vm|oci|all] [-f TEMPLATE] [-v ALPINE_VERSION] [-m MIRROR] [-o OUTDIR] [-r MINIROOTFS]
 #   --podman  build inside an Alpine container with podman
-#   -t  what to build: lxc (default), vm, or all (both from one root filesystem)
-#   -f  with -t vm: make the VM image from this LXC template (.tar.gz) instead
+#   -t  what to build: lxc (default), vm, oci, or all (all three from one root filesystem)
+#   -f  with -t vm or oci: make the image from this LXC template (.tar.gz) instead
 #       of building the root filesystem again (CI does this)
 #   -v  Alpine branch, e.g. 3.22 (default: $ALPINE_VERSION or ALPINE_VERSION below)
 #   -m  Alpine mirror (default: $ALPINE_MIRROR or https://dl-cdn.alpinelinux.org/alpine)
@@ -57,17 +60,18 @@ while [ $# -gt 0 ]; do
 		-r) MINIROOTFS=$2; shift 2 ;;
 		-t) TARGET=$2; shift 2 ;;
 		-f) FROM=$2; shift 2 ;;
-		-h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) die "unknown option: $1" ;;
 	esac
 done
 TARGET_ARG=$TARGET
 case $TARGET in
-	lxc|vm) ;;
-	all) TARGET="lxc vm" ;;
-	*) die "-t: lxc, vm or all" ;;
+	lxc|vm|oci) ;;
+	# oci works on a copy of the root, so it can come before vm changes it
+	all) TARGET="lxc oci vm" ;;
+	*) die "-t: lxc, vm, oci or all" ;;
 esac
-[ -z "$FROM" ] || [ "$TARGET" = vm ] || die "-f only works with -t vm"
+case $TARGET in vm|oci) ;; *) [ -z "$FROM" ] || die "-f only works with -t vm or -t oci" ;; esac
 [ -z "$FROM" ] || [ -f "$FROM" ] || die "no such template: $FROM"
 
 if [ -n "$PODMAN" ]; then
@@ -129,6 +133,60 @@ set_rc_sys() {
 	else
 		echo "rc_sys=\"$1\"" >> "$ROOT/etc/rc.conf"
 	fi
+}
+
+# oci_image DIR OUT: write DIR as a one-layer OCI image archive (oci-layout,
+# index.json, blobs/, plus docker's manifest.json) that podman load and
+# docker load accept. The image is
+# named pxmxfw:latest; CI pushes it to ghcr.io under other names.
+oci_image() {
+	L=$WORK/oci-layout out=$2
+	mkdir -p "$L/blobs/sha256"
+	tar --numeric-owner -cf "$WORK/layer.tar" -C "$1" .
+	diffid=$(sha256sum "$WORK/layer.tar" | cut -d' ' -f1)
+	gzip -n "$WORK/layer.tar"
+	blob() { # FILE: move FILE into blobs/, print "DIGEST SIZE"
+		_d=$(sha256sum "$1" | cut -d' ' -f1)
+		_s=$(wc -c < "$1" | tr -d ' ')
+		mv "$1" "$L/blobs/sha256/$_d"
+		echo "$_d $_s"
+	}
+	read -r layer layersize <<-EOF
+	$(blob "$WORK/layer.tar.gz")
+	EOF
+	created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	cat > "$WORK/config.json" <<-EOF
+	{"architecture":"amd64","os":"linux","created":"$created",
+	 "config":{"Cmd":["/sbin/init"],"StopSignal":"SIGTERM",
+	  "Env":["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
+	  "ExposedPorts":{"8443/tcp":{}},
+	  "Labels":{"org.opencontainers.image.source":"https://github.com/rumblebump/pxmxfw",
+	   "org.opencontainers.image.version":"$PXMXFW_VERSION",
+	   "org.opencontainers.image.description":"pxmxfw firewall for podman and docker (needs NET_ADMIN)"}},
+	 "rootfs":{"type":"layers","diff_ids":["sha256:$diffid"]},
+	 "history":[{"created":"$created","created_by":"pxmxfw build.sh -t oci"}]}
+	EOF
+	read -r config configsize <<-EOF
+	$(blob "$WORK/config.json")
+	EOF
+	cat > "$WORK/manifest.json" <<-EOF
+	{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+	 "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:$config","size":$configsize},
+	 "layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:$layer","size":$layersize}]}
+	EOF
+	read -r manifest manifestsize <<-EOF
+	$(blob "$WORK/manifest.json")
+	EOF
+	cat > "$L/index.json" <<-EOF
+	{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json",
+	 "manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:$manifest","size":$manifestsize,
+	  "annotations":{"org.opencontainers.image.ref.name":"pxmxfw:latest","io.containerd.image.name":"docker.io/library/pxmxfw:latest"}}]}
+	EOF
+	echo '{"imageLayoutVersion":"1.0.0"}' > "$L/oci-layout"
+	# what "docker save" adds for docker's older (non-containerd) image store
+	echo "[{\"Config\":\"blobs/sha256/$config\",\"RepoTags\":[\"pxmxfw:latest\"],\"Layers\":[\"blobs/sha256/$layer\"]}]" > "$L/manifest.json"
+	tar --numeric-owner -cf "$out" -C "$L" oci-layout index.json manifest.json blobs
+	rm -rf "$L"
 }
 
 # The root filesystem both targets share
@@ -250,6 +308,25 @@ for t in $TARGET; do
 		rm -rf "$ROOT/var/cache/apk/"* "$ROOT/tmp/"*
 		tar --numeric-owner -czf "$NAME.tar.gz" -C "$ROOT" .
 		echo ">> Done: $NAME.tar.gz ($(du -h "$NAME.tar.gz" | cut -f1))"
+		;;
+	oci)
+		# on a copy, so the VM (built next with -t all) keeps its services
+		O=$WORK/oci-rootfs
+		cp -a "$ROOT" "$O"
+		cp -a "$SRCDIR/targets/oci/rootfs/." "$O/"
+		(cd "$SRCDIR/targets/oci/rootfs" && find . -mindepth 1) | while read -r f; do chown -h 0:0 "$O/$f"; done
+		# docker and podman set the network and the hostname; sysctls come
+		# from --sysctl, since /proc/sys is read-only in the container
+		R=$ROOT ROOT=$O
+		set_rc_sys docker
+		ROOT=$R
+		rm -f "$O/etc/runlevels/boot/sysctl"
+		echo oci > "$O/usr/share/pxmxfw/TARGET"
+		rm -rf "$O/var/cache/apk/"* "$O/tmp/"*
+		echo ">> Writing the container image $NAME.oci.tar"
+		oci_image "$O" "$NAME.oci.tar"
+		rm -rf "$O"
+		echo ">> Done: $NAME.oci.tar ($(du -h "$NAME.oci.tar" | cut -f1)), load it with: podman load -i $(basename "$NAME").oci.tar"
 		;;
 	vm)
 		[ -f /etc/alpine-release ] || die "the VM image is built on Alpine: use --podman"
