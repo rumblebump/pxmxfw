@@ -365,6 +365,13 @@ printf 'iface eth1 inet static\n\taddress 10.20.0.1\n\tnetmask 255.255.0.0\n' > 
 fresh_etc "$T/etc"
 boot_env "$PXMXFW" firstboot > /dev/null 2>&1
 grep -q 'dhcp=10.20.0.100-10.20.0.200' "$T/etc/interfaces" && ok || bad "netmask style address"
+# VM image: nothing configures eth1, so it gets the default LAN address
+printf 'auto eth0\niface eth0 inet dhcp\n' > "$T/interfaces"
+fresh_etc "$T/etc"
+boot_env env PXMXFW_TARGET=vm "$PXMXFW" firstboot > /dev/null 2>&1
+grep -qx 'eth1 addr=192.168.10.1/24 addr6=none dhcp=192.168.10.100-192.168.10.200' "$T/etc/interfaces" &&
+	grep -q '^forward accept in=eth1 out=eth0' "$T/etc/rules" && ok || bad "vm: eth1 gets the default LAN address: $(cat "$T/etc/interfaces")"
+boot_env "$PXMXFW" validate interfaces "$T/etc/interfaces" && ok || bad "vm: firstboot output is valid"
 rm -rf "$T/sys/eth1" "$T/sys/eth2" "$T/sys/eth3"
 fresh_etc "$T/etc"
 boot_env "$PXMXFW" firstboot > /dev/null 2>&1

@@ -18,6 +18,9 @@ wget https://github.com/rumblebump/pxmxfw/releases/latest/download/pxmxfw_amd64.
 Or in the web UI: *local* storage, *CT Templates*, *Download from URL*, with
 the same link. `SHA256SUMS` in the release lists the checksums.
 
+Each release also has a VM disk image, `pxmxfw_amd64.qcow2`, for running
+pxmxfw as a Proxmox VM instead (see [Run it as a VM](#run-it-as-a-vm)).
+
 The newest build of `main` (for testing, not a release) is always at
 `https://github.com/rumblebump/pxmxfw/releases/download/edge/pxmxfw_amd64.tar.gz`.
 The zipped files under a workflow run's *Artifacts* need a GitHub login, so
@@ -31,9 +34,12 @@ versions that create containers from OCI images:
 
 The *CI* workflow runs in stages: **test** (Go, shellcheck, rule tests),
 **build** (the template), then **test-template** (config and web UI checks
-inside the built template) and **security** (a [Trivy](https://trivy.dev) scan
-that lists known CVEs with a fix in the run summary), and last **release**
-(GitHub releases and ghcr.io images; not for pull requests).
+inside the built template), **security** (a [Trivy](https://trivy.dev) scan
+that lists known CVEs with a fix in the run summary) and **build-vm** (the
+qcow2 VM image, made from that template), then **test-vm** (boots the image
+in QEMU and checks DHCP, the firewall, the web UI and ACPI shutdown over the
+serial console), and last **release** (GitHub releases and ghcr.io images;
+not for pull requests).
 
 Releases are tagged `v<pxmxfw version>+alpine<Alpine version>`, e.g.
 `v0.1.0+alpine3.22.6`. Edge is rebuilt after every merge and every Monday with
@@ -52,8 +58,16 @@ repository.
 With [podman](https://podman.io) on any x86_64 Linux, no root needed:
 
 ```sh
-./build.sh --podman
+./build.sh --podman            # LXC template (.tar.gz)
+./build.sh --podman -t vm      # VM disk image (.qcow2)
+./build.sh --podman -t all     # both, from one root filesystem
 ```
+
+The repository is laid out so both come from the same files: `rootfs/` is
+what the container and the VM share, `targets/lxc/rootfs/` and
+`targets/vm/rootfs/` hold the few files that differ (inittab, motd, and for
+the VM fstab, network config and the initramfs drivers), and
+`targets/vm/mkimage.sh` adds the kernel and bootloader and writes the disk.
 
 Or as root on an x86_64 Linux host with internet access (a Proxmox node works):
 
@@ -93,6 +107,38 @@ pct start 200
 
 `vmbr0` is the upstream bridge (WAN) and `vmbr1` the protected network
 (LAN). Set a root password (`--password`): the web UI logs in as root with it.
+
+## Run it as a VM
+
+The same firewall also runs as a VM, with its own kernel: useful for PCI
+passthrough of NICs, or to keep the firewall apart from the host's kernel.
+The image has a 2 GB disk (a FAT `/boot` with syslinux, and an ext4 root),
+the `linux-virt` kernel and the QEMU guest agent. It is a compressed qcow2,
+so import it as it is (grow the disk later with `qm disk resize`):
+
+```sh
+wget https://github.com/rumblebump/pxmxfw/releases/latest/download/pxmxfw_amd64.qcow2
+qm create 300 --name pxmxfw --ostype l26 --memory 256 --cores 1 \
+  --scsihw virtio-scsi-single --agent 1 --serial0 socket \
+  --net0 virtio,bridge=vmbr0 --net1 virtio,bridge=vmbr1
+qm set 300 --scsi0 local-lvm:0,import-from=$PWD/pxmxfw_amd64.qcow2 --boot order=scsi0
+qm start 300
+```
+
+Then log in as root on the console (no password yet; there is no SSH
+server) and set one with `passwd`: the web UI refuses empty passwords.
+
+What differs from the container:
+
+- Nobody writes the network config for you. `eth0` (net0, the WAN) uses
+  DHCP from `/etc/network/interfaces`; put a static address there instead
+  if you need one. That file plays the part Proxmox plays for the container.
+- `eth1` (net1, the LAN) gets `192.168.10.1/24` on first boot, with the DHCP
+  range `.100` to `.200`, and the web UI at `https://192.168.10.1:8443`.
+- NICs are named in PCI order, so keep net0 as the WAN.
+- Kernel modules (WireGuard, VLAN, bridge) load in the VM itself at boot;
+  Checks shows `modprobe` for the VM instead of the Proxmox host.
+- Proxmox's Shutdown works with or without the guest agent (ACPI).
 
 ## First start
 

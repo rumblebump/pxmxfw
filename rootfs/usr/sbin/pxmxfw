@@ -351,6 +351,9 @@ cmd_detect() {
 # only derives pxmxfw's own defaults from what Proxmox configured: eth0 (net0)
 # is the WAN, eth1 (net1) the LAN. Other NICs get no rules, so nothing
 # passes through them until rules are added.
+# In the VM image nobody configures eth1, so without an address in
+# /etc/network/interfaces the LAN gets VM_LAN_ADDR.
+VM_LAN_ADDR=192.168.10.1/24
 
 cmd_firstboot() {
 	[ -e "$FIRSTBOOT_DONE" ] && { echo "first boot setup already done"; return 0; }
@@ -367,7 +370,10 @@ cmd_firstboot() {
 			line=$(detect_line "$i")
 			if [ "$i" = eth1 ]; then
 				lan=eth1
-				if addr=$(proxmox_address eth1) && range=$(dhcp_range_for "$addr"); then
+				if [ "$PXMXFW_TARGET" = vm ] && ! proxmox_address eth1 > /dev/null; then
+					line="eth1 addr=$VM_LAN_ADDR addr6=none dhcp=$(dhcp_range_for "$VM_LAN_ADDR")"
+					echo "pxmxfw: LAN eth1 is $VM_LAN_ADDR (dnsmasq stays off until enabled)" >&2
+				elif addr=$(proxmox_address eth1) && range=$(dhcp_range_for "$addr"); then
 					line="$line dhcp=$range"
 					echo "pxmxfw: LAN eth1 is $addr, DHCP range $range (dnsmasq stays off until enabled)" >&2
 				fi
@@ -532,7 +538,7 @@ cmd_boot() {
 # ---- checks ---------------------------------------------------------------
 # A container shares the Proxmox host's kernel and cannot load modules
 # itself, so each feature the ruleset needs is probed, and a failure names
-# the modules to load on the host.
+# the modules to load on the host (in the VM image: on the VM itself).
 #
 # Output: one line per check, tab separated: STATUS ID TITLE DETAIL HINT
 # STATUS is ok, warn or fail. HINT may name modules as "modules:a b c".
@@ -575,8 +581,9 @@ _c_iface() { # name addr addr6 dhcp comment type ...
 	else
 		n=${1#eth}
 		case $n in *[!0-9]*|'') n=N ;; esac
-		_check fail "if_$1" "$t" "missing" \
-			"Add it in Proxmox: pct set CTID -net$n name=$1,bridge=vmbrX"
+		if [ "$PXMXFW_TARGET" = vm ]; then h="Add it in Proxmox: qm set VMID -net$n virtio,bridge=vmbrX"
+		else h="Add it in Proxmox: pct set CTID -net$n name=$1,bridge=vmbrX"; fi
+		_check fail "if_$1" "$t" "missing" "$h"
 	fi
 }
 
@@ -642,8 +649,10 @@ cmd_check() {
 	fi
 
 	ifaces_each "$IFACES" _c_iface 2>/dev/null || true
+	if [ "$PXMXFW_TARGET" = vm ]; then h="qm set VMID -net1 virtio,bridge=vmbr1, then reboot"
+	else h="pct set CTID -net1 name=eth1,bridge=vmbr1,ip=192.168.10.1/24"; fi
 	[ "$IF_NAMES" != "$WAN" ] || _check warn inside "LAN side" "no interface besides the WAN" \
-		"Add a second network device in Proxmox (pct set CTID -net1 name=eth1,bridge=vmbr1,ip=192.168.10.1/24), then add rules for it in the web UI."
+		"Add a second network device in Proxmox ($h), then add rules for it in the web UI."
 
 	if [ "$FIREWALL" = manual ]; then
 		if [ -n "$(nft list ruleset 2>/dev/null | grep 'hook input')" ]; then
@@ -674,6 +683,15 @@ host_modules_hint() {
 	mods=$(cut -f5 | sed -n 's/^modules://p' | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ')
 	mods=${mods% }
 	[ -n "$mods" ] || return 0
+	if [ "$PXMXFW_TARGET" = vm ]; then
+		cat <<-EOF
+
+		Load the missing modules and keep them after a reboot:
+		  modprobe -a $mods
+		  printf '%s\n' $mods >> /etc/modules-load.d/pxmxfw.conf
+		EOF
+		return 0
+	fi
 	cat <<-EOF
 
 	On the Proxmox host (as root), load the missing modules and keep them after a reboot:
@@ -709,6 +727,7 @@ cmd_status() {
 	echo "version=$(cat /usr/share/pxmxfw/VERSION 2>/dev/null || echo dev)"
 	echo "hostname=$(hostname)"
 	echo "alpine=$(cat /etc/alpine-release 2>/dev/null)"
+	echo "target=$PXMXFW_TARGET"
 	echo "uptime=$(awk '{ printf "%d\n", $1 }' /proc/uptime)"
 	echo "wan_if=$WAN_IF"
 	echo "ipv6=$IPV6"

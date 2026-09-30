@@ -1,6 +1,6 @@
 name: CI
 
-# Stages: test -> build -> test-template + security -> release
+# Stages: test -> build -> test-template + security + build-vm -> test-vm -> release
 on:
   push:
     branches: [main]
@@ -57,7 +57,7 @@ jobs:
         run: |
           shellcheck -s sh -S warning -e SC2034 \
             rootfs/usr/sbin/pxmxfw rootfs/usr/lib/pxmxfw/lib.sh \
-            rootfs/etc/init.d/pxmxfw* tests/run.sh
+            rootfs/etc/init.d/pxmxfw* tests/run.sh build.sh targets/vm/mkimage.sh
 
       # As root, so generated rulesets are loaded into a throwaway netns
       - name: Tests (dash)
@@ -181,6 +181,57 @@ jobs:
           sudo umount /tmp/fw/proc /tmp/fw/dev
           cat webui.log
 
+  # The VM disk image, made from the template the build stage just made, so
+  # both carry the same packages and pxmxfw version.
+  build-vm:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pxmxfw-template
+          path: template
+
+      - name: Build the VM image (podman)
+        run: |
+          ./build.sh --podman -t vm -f template/*.tar.gz -o out
+          ls -l out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pxmxfw-vm
+          path: out/*.qcow2
+          if-no-files-found: error
+          compression-level: 0 # the qcow2 is compressed already
+
+  # Boots the VM image in QEMU (KVM) like a Proxmox VM and checks it over
+  # the serial console: DHCP on the WAN, the firewall, the web UI, shutdown.
+  test-vm:
+    runs-on: ubuntu-latest
+    needs: build-vm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pxmxfw-vm
+          path: out
+
+      - name: Install QEMU and allow KVM
+        run: |
+          sudo apt-get update && sudo apt-get install -y qemu-system-x86
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+
+      - name: Boot and check the VM
+        run: timeout 600 tests/vm-boot.py out/*.qcow2
+
+      - name: Serial console log
+        if: always()
+        run: cat vm-serial.log || true
+
   # Report only: known CVEs with a fix in Alpine or Go. Rebuilding picks up
   # fixed Alpine packages; the weekly run does that for edge.
   security:
@@ -213,9 +264,10 @@ jobs:
   #   releases/download/edge/pxmxfw_amd64.tar.gz (newest main build)
   # or pulls the same root filesystem as an OCI image:
   #   ghcr.io/rumblebump/pxmxfw:latest, :edge, :0.1.0-alpine3.22.6
+  # and the VM disk the same way: .../download/pxmxfw_amd64.qcow2
   release:
     runs-on: ubuntu-latest
-    needs: [build, test-template, security]
+    needs: [build, test-template, security, test-vm]
     if: >-
       github.event_name != 'pull_request' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
@@ -229,6 +281,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: pxmxfw-template
+          path: out
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pxmxfw-vm
           path: out
 
       - name: Pick what to publish
@@ -260,6 +317,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           # Fixed name so the download URLs above never change
           cp alpine-*-pxmxfw-*_amd64.tar.gz pxmxfw_amd64.tar.gz
+          cp alpine-*-pxmxfw-*_amd64.qcow2 pxmxfw_amd64.qcow2
 
       # Every merge to main and the weekly run replace the "edge" prerelease
       - name: GitHub release (edge)
@@ -268,9 +326,9 @@ jobs:
           ALPINE: ${{ steps.what.outputs.alpine }}
         run: |
           cd out
-          sha256sum pxmxfw_amd64.tar.gz > SHA256SUMS
+          sha256sum pxmxfw_amd64.tar.gz pxmxfw_amd64.qcow2 > SHA256SUMS
           gh release delete edge --cleanup-tag --yes 2>/dev/null || true
-          gh release create edge pxmxfw_amd64.tar.gz SHA256SUMS --prerelease --latest=false \
+          gh release create edge pxmxfw_amd64.tar.gz pxmxfw_amd64.qcow2 SHA256SUMS --prerelease --latest=false \
             --target "$GITHUB_SHA" --title "edge (latest main)" \
             --notes "Built from ${GITHUB_SHA::7} on main with Alpine $ALPINE. Not a release; use a v* release for production."
 
@@ -281,8 +339,8 @@ jobs:
           ALPINE: ${{ steps.what.outputs.alpine }}
         run: |
           cd out
-          sha256sum *.tar.gz > SHA256SUMS
-          gh release create "$TAG" *.tar.gz SHA256SUMS --target "$GITHUB_SHA" --title "$TAG" \
+          sha256sum *.tar.gz *.qcow2 > SHA256SUMS
+          gh release create "$TAG" *.tar.gz *.qcow2 SHA256SUMS --target "$GITHUB_SHA" --title "$TAG" \
             --notes "Built on Alpine $ALPINE." --generate-notes
           echo "Released $TAG" >> "$GITHUB_STEP_SUMMARY"
 

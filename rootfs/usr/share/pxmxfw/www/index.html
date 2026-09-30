@@ -450,7 +450,7 @@
 	<!-- Checks -->
 	<section x-show="tab === 'checks'">
 		<h2>System checks</h2>
-		<p class="muted">A container uses the Proxmox host's kernel and cannot load kernel modules itself. Anything missing here has to be fixed on the host.</p>
+		<p class="muted" x-show="!vm()">A container uses the Proxmox host's kernel and cannot load kernel modules itself. Anything missing here has to be fixed on the host.</p>
 		<table>
 			<tr><th></th><th>Check</th><th>Result</th></tr>
 			<template x-for="c in checks" :key="c.id">
@@ -466,9 +466,10 @@
 		</table>
 
 		<div x-show="missingModules.length" x-cloak>
-			<h2>Fix on the Proxmox host</h2>
-			<label>Container ID <input x-model="ctidValue" size="6" placeholder="CTID" @change="saveCtid()"></label>
-			<p>Run this on the Proxmox host as root. It loads the modules now and on every boot, then restarts this container:</p>
+			<h2 x-text="vm() ? 'Load the missing modules' : 'Fix on the Proxmox host'"></h2>
+			<label x-show="!vm()">Container ID <input x-model="ctidValue" size="6" placeholder="CTID" @change="saveCtid()"></label>
+			<p x-show="!vm()">Run this on the Proxmox host as root. It loads the modules now and on every boot, then restarts this container:</p>
+			<p x-show="vm()">Run this in the terminal here. It loads the modules now and on every boot:</p>
 			<pre class="code" x-text="hostCommands()"></pre>
 			<button @click="copy(hostCommands())">Copy</button>
 		</div>

@@ -1,0 +1,12 @@
+# pxmxfw inittab for a Proxmox VM
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+# Proxmox console (noVNC) and the serial console (qm set VMID -serial0 socket)
+tty1::respawn:/sbin/getty 38400 tty1
+tty2::respawn:/sbin/getty 38400 tty2
+ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100
+
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown

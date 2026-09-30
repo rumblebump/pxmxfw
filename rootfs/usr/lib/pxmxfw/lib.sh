@@ -15,6 +15,8 @@ PXMXFW_DNSMASQ_CONF=${PXMXFW_DNSMASQ_CONF:-/etc/dnsmasq.d/pxmxfw.conf}
 PXMXFW_NET_INTERFACES=${PXMXFW_NET_INTERFACES:-/etc/network/interfaces}
 PXMXFW_SYSNET=${PXMXFW_SYSNET:-/sys/class/net}
 PXMXFW_PROCSYS=${PXMXFW_PROCSYS:-/proc/sys}
+# lxc (a Proxmox container) or vm (the disk image), written by build.sh
+PXMXFW_TARGET=${PXMXFW_TARGET:-$(cat /usr/share/pxmxfw/TARGET 2>/dev/null || echo lxc)}
 
 # ---- validators (return 0 when valid) --------------------------------------
 
