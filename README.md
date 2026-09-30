@@ -140,6 +140,57 @@ What differs from the container:
   Checks shows `modprobe` for the VM instead of the Proxmox host.
 - Proxmox's Shutdown works with or without the guest agent (ACPI).
 
+### Without Proxmox: libvirt or plain QEMU
+
+The image boots on any KVM host (BIOS, VirtIO or SATA disk). With libvirt,
+give it two networks: the WAN on libvirt's `default` NAT network (it hands
+out an address by DHCP), and the LAN on a network of its own without DHCP,
+because pxmxfw is the router there:
+
+```sh
+cat > pxmxfw-lan.xml <<'EOF'
+<network>
+  <name>pxmxfw-lan</name>
+  <bridge name="virbr-pxmxfw" stp="on" delay="0"/>
+</network>
+EOF
+virsh net-define pxmxfw-lan.xml
+virsh net-start pxmxfw-lan
+virsh net-autostart pxmxfw-lan
+
+sudo cp pxmxfw_amd64.qcow2 /var/lib/libvirt/images/pxmxfw.qcow2
+virt-install --name pxmxfw --memory 256 --vcpus 1 --osinfo linux2022 \
+  --import --disk /var/lib/libvirt/images/pxmxfw.qcow2,bus=virtio \
+  --network network=default,model=virtio \
+  --network network=pxmxfw-lan,model=virtio \
+  --channel unix,target.type=virtio,target.name=org.qemu.guest_agent.0 \
+  --graphics none --console pty,target.type=serial
+```
+
+The first `--network` becomes eth0 (WAN), the second eth1 (LAN).
+`--graphics none` puts you on the serial console (leave it with `Ctrl+]`,
+come back with `virsh console pxmxfw`). Log in as root and run `passwd`.
+Other VMs attached to `pxmxfw-lan` reach the web UI at
+`https://192.168.10.1:8443`, and get addresses from pxmxfw once you turn on
+DHCP there. `virsh shutdown pxmxfw` shuts it down cleanly (ACPI).
+
+`virt-install --import` uses the image in place, so keep the download if you
+want a fresh copy later. To grow the disk: `qemu-img resize` while the VM is
+off, then grow partition 2 and run `resize2fs` inside the VM.
+
+For a quick test without libvirt, plain QEMU works too. The WAN uses QEMU's
+own NAT and nothing is attached to the LAN:
+
+```sh
+qemu-system-x86_64 -enable-kvm -m 256 -nographic -snapshot \
+  -drive file=pxmxfw_amd64.qcow2,if=virtio \
+  -nic user,model=virtio-net-pci \
+  -nic socket,listen=127.0.0.1:40001,model=virtio-net-pci
+```
+
+`-snapshot` leaves the image unchanged; drop it to keep your changes. Quit
+with `Ctrl+A` then `X`.
+
 ## First start
 
 Proxmox writes `/etc/network/interfaces`, `/etc/hostname`, `/etc/hosts` and
