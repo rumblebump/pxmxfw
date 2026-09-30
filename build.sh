@@ -136,7 +136,8 @@ set_rc_sys() {
 }
 
 # oci_image DIR OUT: write DIR as a one-layer OCI image archive (oci-layout,
-# index.json, blobs/) that podman load and docker load accept. The image is
+# index.json, blobs/, plus docker's manifest.json) that podman load and
+# docker load accept. The image is
 # named pxmxfw:latest; CI pushes it to ghcr.io under other names.
 oci_image() {
 	L=$WORK/oci-layout out=$2
@@ -182,7 +183,9 @@ oci_image() {
 	  "annotations":{"org.opencontainers.image.ref.name":"pxmxfw:latest","io.containerd.image.name":"docker.io/library/pxmxfw:latest"}}]}
 	EOF
 	echo '{"imageLayoutVersion":"1.0.0"}' > "$L/oci-layout"
-	tar --numeric-owner -cf "$out" -C "$L" oci-layout index.json blobs
+	# what "docker save" adds for docker's older (non-containerd) image store
+	echo "[{\"Config\":\"blobs/sha256/$config\",\"RepoTags\":[\"pxmxfw:latest\"],\"Layers\":[\"blobs/sha256/$layer\"]}]" > "$L/manifest.json"
+	tar --numeric-owner -cf "$out" -C "$L" oci-layout index.json manifest.json blobs
 	rm -rf "$L"
 }
 

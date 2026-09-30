@@ -387,10 +387,11 @@ if [ -n "$NFT" ] && unshare -n sh -c 'ip link add eth0 type dummy' 2>/dev/null; 
 		ip link add eth0 type dummy && ip link add eth1 type dummy && ip link add eth2 type dummy &&
 		ip link set eth0 up && ip link set eth1 up &&
 		ip addr add 172.30.0.2/16 dev eth0 && ip addr add 172.31.5.2/24 dev eth1 &&
-		ip route add default via 172.30.0.1 &&
+		ip route add default via 172.30.0.1 && ip route add default via 172.31.5.1 dev eth1 metric 50 &&
 		PXMXFW_TARGET=oci PXMXFW_ETC='$T/etc' PXMXFW_SYSNET='$T/sys' PXMXFW_NET_INTERFACES='$T/net/interfaces' '$PXMXFW' runtime-net &&
-		PXMXFW_TARGET=oci PXMXFW_ETC='$T/etc' PXMXFW_SYSNET='$T/sys' PXMXFW_NET_INTERFACES='$T/net/interfaces' '$PXMXFW' firstboot" > "$T/out" 2>&1; then ok
-	else bad "oci: runtime-net and firstboot: $(cat "$T/out")"; fi
+		PXMXFW_TARGET=oci PXMXFW_ETC='$T/etc' PXMXFW_SYSNET='$T/sys' PXMXFW_NET_INTERFACES='$T/net/interfaces' '$PXMXFW' firstboot &&
+		ip route show | grep -q '^default via 172.30.0.1 dev eth0' && ! ip route show | grep -q '^default.*eth1'" > "$T/out" 2>&1; then ok
+	else bad "oci: runtime-net and firstboot, only the WAN keeps a default route: $(cat "$T/out")"; fi
 	awk '$1 == "iface" { i = ($2 == "eth0" && $3 == "inet") } i && $1 == "address" { a = $2 } i && $1 == "gateway" { g = $2 }
 		END { exit !(a == "172.30.0.2/16" && g == "172.30.0.1") }' "$T/net/interfaces" && ok ||
 		bad "oci: WAN address and gateway written: $(cat "$T/net/interfaces")"

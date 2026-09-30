@@ -356,6 +356,7 @@ cmd_detect() {
 
 cmd_runtime_net() {
 	mkdir -p "${PXMXFW_NET_INTERFACES%/*}"
+	wan=$(sed -n 's/^[[:space:]]*WAN=\([A-Za-z0-9_.-]*\).*/\1/p' "$PXMXFW_ETC/pxmxfw.conf" 2>/dev/null | tail -n 1)
 	{
 		echo "# Written by pxmxfw on every start: the addresses podman or docker set."
 		echo "auto lo"
@@ -369,12 +370,21 @@ cmd_runtime_net() {
 				if [ "$fam" = 4 ]; then echo "iface $i inet static"; else echo "iface $i inet6 static"; fi
 				echo "	address $a"
 				gw=$(ip -"$fam" route show 2>/dev/null |
-					awk -v ifc="$i" '$1 == "default" { for (n = 2; n < NF; n++) { if ($n == "via") g = $(n + 1); if ($n == "dev") d = $(n + 1) } if (d == ifc && g != "") { print g; exit } }')
+					awk -v ifc="$i" -v wan="${wan:-eth0}" 'ifc == wan && $1 == "default" { for (n = 2; n < NF; n++) { if ($n == "via") g = $(n + 1); if ($n == "dev") d = $(n + 1) } if (d == ifc && g != "") { print g; exit } }')
 				[ -z "$gw" ] || echo "	gateway $gw"
 			done
 		done
 	} > "$PXMXFW_NET_INTERFACES.new"
 	mv "$PXMXFW_NET_INTERFACES.new" "$PXMXFW_NET_INTERFACES"
+	# podman gives every network a default route; only the WAN's stays
+	for fam in 4 6; do
+		ip -"$fam" route show 2>/dev/null |
+			awk -v wan="${wan:-eth0}" '$1 == "default" { for (n = 2; n < NF; n++) if ($n == "dev") d = $(n + 1); if (d != wan) print }' |
+			while read -r r; do
+				# shellcheck disable=SC2086
+				ip -"$fam" route del $r 2>/dev/null || true
+			done
+	done
 }
 
 # ---- first boot -----------------------------------------------------------

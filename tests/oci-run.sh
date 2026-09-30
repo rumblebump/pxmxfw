@@ -64,6 +64,8 @@ x cat /usr/share/pxmxfw/TARGET | grep -qx oci || fail "TARGET is not oci"
 x nft list table inet pxmxfw >/dev/null || fail "firewall table not loaded"
 x ip -4 -o addr show dev eth0 | grep -q "inet $FW_WAN/" || fail "eth0 lost the WAN address"
 x ip -4 -o addr show dev eth1 | grep -q "inet $FW_LAN/" || fail "eth1 lost the LAN address"
+test "$(x ip -4 route show | grep -c '^default')" = 1 && x ip -4 route show | grep -q "^default via $WANNET.1 dev eth0" ||
+	fail "default route is not only via the WAN: $(x ip -4 route show)"
 x grep -qx "eth1 addr6=none dhcp=$LANNET.100-$LANNET.200" /etc/pxmxfw/interfaces ||
 	fail "eth1 is not the LAN: $(x cat /etc/pxmxfw/interfaces)"
 x pxmxfw check --tsv | awk -F '\t' '$1 == "fail" { print; f = 1 } END { exit f }' >&2 ||
