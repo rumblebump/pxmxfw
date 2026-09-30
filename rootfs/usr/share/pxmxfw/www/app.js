@@ -1028,8 +1028,9 @@ document.addEventListener('alpine:init', () => {
 				.flatMap(c => c.hint.slice(8).split(' '));
 			return [...new Set(mods)].filter(Boolean);
 		},
+		vm() { return this.status.target === 'vm'; },
 		hintText(c) {
-			if (c.hint.startsWith('modules:')) return `On the Proxmox host: modprobe -a ${c.hint.slice(8)} (see below to keep it loaded)`;
+			if (c.hint.startsWith('modules:')) return `${this.vm() ? 'In a terminal here' : 'On the Proxmox host'}: modprobe -a ${c.hint.slice(8)} (see below to keep it loaded)`;
 			return this.ctid(c.hint);
 		},
 		ctid(text) { return text.replaceAll('CTID', this.ctidValue.trim() || 'CTID'); },
@@ -1039,7 +1040,7 @@ document.addEventListener('alpine:init', () => {
 			return this.ctid([
 				`modprobe -a ${m}`,
 				`printf '%s\\n' ${m} >> /etc/modules-load.d/pxmxfw.conf`,
-				'pct reboot CTID',
+				...(this.vm() ? [] : ['pct reboot CTID']),
 			].join('\n'));
 		},
 		async copy(text) {

@@ -1,0 +1,9 @@
+pxmxfw: Alpine firewall for Proxmox (VM)
+
+  Web UI:   https://<LAN address>:8443  (user root, your root password)
+            eth1 is the LAN, 192.168.10.1/24 unless set otherwise
+  WAN:      eth0, DHCP; a static address goes in /etc/network/interfaces
+  Status:   pxmxfw status   |  Checks: pxmxfw check
+  Settings: /etc/pxmxfw     |  Apply:  pxmxfw apply
+
+  Set a root password first: passwd

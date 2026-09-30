@@ -1,0 +1,2 @@
+LABEL=pxmxfw_root	/	ext4	rw,noatime	0 0
+LABEL=PXMXFW_BOOT	/boot	vfat	rw,noatime	0 0

@@ -1,0 +1,12 @@
+# In the VM this file does what Proxmox does for the container: it sets the
+# WAN address. For a static one, replace the eth0 lines with e.g.:
+#   iface eth0 inet static
+#   	address 203.0.113.10/24
+#   	gateway 203.0.113.1
+# (and put a nameserver in /etc/resolv.conf). Other interfaces are set in
+# the web UI or /etc/pxmxfw/interfaces.
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp

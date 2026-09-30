@@ -1,0 +1,3 @@
+#!/bin/sh
+# Power button (Proxmox Shutdown without the guest agent)
+poweroff
