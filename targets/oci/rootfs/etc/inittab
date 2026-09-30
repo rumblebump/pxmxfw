@@ -1,0 +1,9 @@
+# pxmxfw inittab for podman and docker
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+# No consoles: use "podman exec -it NAME sh" (or docker exec)
+
+# "podman stop" / "docker stop" send SIGTERM, which runs this
+::shutdown:/sbin/openrc shutdown

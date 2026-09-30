@@ -1,0 +1,5 @@
+pxmxfw: Alpine firewall, running under podman or docker
+
+  Web UI:   https://<LAN address>:8443  (user root; set a password with passwd)
+  Status:   pxmxfw status   |  Checks: pxmxfw check
+  Settings: /etc/pxmxfw     |  Apply:  pxmxfw apply

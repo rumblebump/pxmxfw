@@ -11,6 +11,8 @@
 #   render nft|dnsmasq print the generated config without applying it
 #   validate KIND FILE check a config file (settings|interfaces|rules|hosts|wireguard|packages)
 #   firstboot          one-time setup on the first container start
+#   runtime-net        (podman/docker image) write the addresses the runtime
+#                      set to /etc/network/interfaces; boot runs this
 #   wg-keypair         print a new WireGuard key pair (for a peer; not stored)
 #   pkg-list           extra packages from /etc/pxmxfw/packages and their versions
 #   pkg-search TERM    search Alpine packages
@@ -345,6 +347,36 @@ cmd_detect() {
 	done
 }
 
+# ---- podman and docker ----------------------------------------------------
+# In the container image the runtime sets each NIC's address (from its
+# network's IPAM) before init starts, and gives new ones on every start. This
+# writes them down the way Proxmox writes /etc/network/interfaces, so first
+# boot, detection and addr=proxmox treat them the same. Nothing applies this
+# file: under docker and podman OpenRC skips the networking service.
+
+cmd_runtime_net() {
+	mkdir -p "${PXMXFW_NET_INTERFACES%/*}"
+	{
+		echo "# Written by pxmxfw on every start: the addresses podman or docker set."
+		echo "auto lo"
+		echo "iface lo inet loopback"
+		for i in $(present_ifaces); do
+			echo
+			echo "auto $i"
+			for fam in 4 6; do
+				a=$(ip -"$fam" -o addr show dev "$i" 2>/dev/null | awk '$4 !~ /^fe80:/ { print $4; exit }')
+				[ -n "$a" ] || continue
+				if [ "$fam" = 4 ]; then echo "iface $i inet static"; else echo "iface $i inet6 static"; fi
+				echo "	address $a"
+				gw=$(ip -"$fam" route show 2>/dev/null |
+					awk -v ifc="$i" '$1 == "default" { for (n = 2; n < NF; n++) { if ($n == "via") g = $(n + 1); if ($n == "dev") d = $(n + 1) } if (d == ifc && g != "") { print g; exit } }')
+				[ -z "$gw" ] || echo "	gateway $gw"
+			done
+		done
+	} > "$PXMXFW_NET_INTERFACES.new"
+	mv "$PXMXFW_NET_INTERFACES.new" "$PXMXFW_NET_INTERFACES"
+}
+
 # ---- first boot -----------------------------------------------------------
 # Proxmox writes /etc/network/interfaces, /etc/hostname, /etc/hosts and
 # /etc/resolv.conf on every container start, so this never touches them. It
@@ -527,6 +559,7 @@ cmd_migrate() {
 # Boot: first boot setup, pick up new NICs, set addresses, write the ruleset
 # the nftables service loads right after.
 cmd_boot() {
+	[ "$PXMXFW_TARGET" != oci ] || cmd_runtime_net
 	cmd_firstboot
 	cmd_migrate
 	cmd_detect
@@ -581,8 +614,11 @@ _c_iface() { # name addr addr6 dhcp comment type ...
 	else
 		n=${1#eth}
 		case $n in *[!0-9]*|'') n=N ;; esac
-		if [ "$PXMXFW_TARGET" = vm ]; then h="Add it in Proxmox: qm set VMID -net$n virtio,bridge=vmbrX"
-		else h="Add it in Proxmox: pct set CTID -net$n name=$1,bridge=vmbrX"; fi
+		case $PXMXFW_TARGET in
+			vm) h="Add it in Proxmox: qm set VMID -net$n virtio,bridge=vmbrX" ;;
+			oci) h="Give the container a network as $1 and recreate it (see Run it with podman or docker in the README)" ;;
+			*) h="Add it in Proxmox: pct set CTID -net$n name=$1,bridge=vmbrX" ;;
+		esac
 		_check fail "if_$1" "$t" "missing" "$h"
 	fi
 }
@@ -636,23 +672,28 @@ cmd_check() {
 	if [ "$(cat "$PXMXFW_PROCSYS/net/ipv4/ip_forward" 2>/dev/null)" = 1 ]; then
 		_check ok ip_forward "IPv4 forwarding" "enabled" ""
 	else
-		_check fail ip_forward "IPv4 forwarding" "disabled" \
-			"Click Apply. If it stays off, add \"lxc.sysctl.net.ipv4.ip_forward = 1\" to /etc/pve/lxc/CTID.conf on the host and restart the container."
+		if [ "$PXMXFW_TARGET" = oci ]; then h="Start the container with --sysctl net.ipv4.ip_forward=1."
+		else h="Click Apply. If it stays off, add \"lxc.sysctl.net.ipv4.ip_forward = 1\" to /etc/pve/lxc/CTID.conf on the host and restart the container."; fi
+		_check fail ip_forward "IPv4 forwarding" "disabled" "$h"
 	fi
 	if [ "$IPV6" = yes ]; then
 		if [ "$(cat "$PXMXFW_PROCSYS/net/ipv6/conf/all/forwarding" 2>/dev/null)" = 1 ]; then
 			_check ok ip6_forward "IPv6 forwarding" "enabled" ""
 		else
-			_check fail ip6_forward "IPv6 forwarding" "disabled" \
-				"Click Apply. If it stays off, add \"lxc.sysctl.net.ipv6.conf.all.forwarding = 1\" to /etc/pve/lxc/CTID.conf on the host and restart the container."
+			if [ "$PXMXFW_TARGET" = oci ]; then h="Start the container with --sysctl net.ipv6.conf.all.forwarding=1."
+			else h="Click Apply. If it stays off, add \"lxc.sysctl.net.ipv6.conf.all.forwarding = 1\" to /etc/pve/lxc/CTID.conf on the host and restart the container."; fi
+			_check fail ip6_forward "IPv6 forwarding" "disabled" "$h"
 		fi
 	fi
 
 	ifaces_each "$IFACES" _c_iface 2>/dev/null || true
-	if [ "$PXMXFW_TARGET" = vm ]; then h="qm set VMID -net1 virtio,bridge=vmbr1, then reboot"
-	else h="pct set CTID -net1 name=eth1,bridge=vmbr1,ip=192.168.10.1/24"; fi
+	case $PXMXFW_TARGET in
+		vm) h="Add a second network device in Proxmox (qm set VMID -net1 virtio,bridge=vmbr1, then reboot)" ;;
+		oci) h="Give the container a second network as eth1 (see Run it with podman or docker in the README)" ;;
+		*) h="Add a second network device in Proxmox (pct set CTID -net1 name=eth1,bridge=vmbr1,ip=192.168.10.1/24)" ;;
+	esac
 	[ "$IF_NAMES" != "$WAN" ] || _check warn inside "LAN side" "no interface besides the WAN" \
-		"Add a second network device in Proxmox ($h), then add rules for it in the web UI."
+		"$h, then add rules for it in the web UI."
 
 	if [ "$FIREWALL" = manual ]; then
 		if [ -n "$(nft list ruleset 2>/dev/null | grep 'hook input')" ]; then
@@ -692,12 +733,14 @@ host_modules_hint() {
 		EOF
 		return 0
 	fi
+	if [ "$PXMXFW_TARGET" = oci ]; then host="the host" again="podman restart NAME (or docker restart NAME)"
+	else host="the Proxmox host" again="pct reboot CTID"; fi
 	cat <<-EOF
 
-	On the Proxmox host (as root), load the missing modules and keep them after a reboot:
+	On $host (as root), load the missing modules and keep them after a reboot:
 	  modprobe -a $mods
 	  printf '%s\n' $mods >> /etc/modules-load.d/pxmxfw.conf
-	Then restart this container: pct reboot CTID
+	Then restart this container: $again
 	EOF
 }
 
@@ -853,6 +896,7 @@ case ${1:-help} in
 	render) cmd_render "${2:-nft}" ;;
 	validate) [ $# -eq 3 ] || die "usage: pxmxfw validate KIND FILE"; validate "$2" "$3" ;;
 	firstboot) cmd_firstboot ;;
+	runtime-net) cmd_runtime_net ;;
 	webui-listen) cmd_webui_listen ;;
 	wg-keypair) cmd_wg_keypair ;;
 	pkg-list) cmd_pkg_list ;;
@@ -861,6 +905,6 @@ case ${1:-help} in
 	pkg-del) shift; cmd_pkg_del "$@" ;;
 	pkg-sync) cmd_pkg_sync ;;
 	pkg-upgrade) cmd_pkg_upgrade ;;
-	help|-h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//' ;;
+	help|-h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' ;;
 	*) die "unknown command: $1 (try: pxmxfw help)" ;;
 esac
